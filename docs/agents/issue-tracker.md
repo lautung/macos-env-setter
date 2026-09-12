@@ -2,9 +2,7 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
-> **Note:** The repo is not yet initialized — run `git init` and push to `lautung/macos-env-setter` before tracker skills can operate.
->
-> **Migration note:** The wayfinder map from the 2026-09-12 charting session currently lives in `.scratch/macos-env-setter/` (local-markdown fallback). Migrate it to GitHub issues (map + 4 tickets + blocking edges) when the repo is pushed.
+> **Migration note:** The wayfinder map from the 2026-09-12 charting session currently lives in `.scratch/macos-env-setter/` (local-markdown fallback). Migrate it to GitHub issues (map + 4 tickets + blocking edges) before the next wayfinder session — the local files are kept only as migration source.
 
 ## Conventions
 
