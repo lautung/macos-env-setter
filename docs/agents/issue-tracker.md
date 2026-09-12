@@ -2,7 +2,7 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
-> **Migration note:** The wayfinder map from the 2026-09-12 charting session currently lives in `.scratch/macos-env-setter/` (local-markdown fallback). Migrate it to GitHub issues (map + 4 tickets + blocking edges) before the next wayfinder session — the local files are kept only as migration source.
+> **Migration note:** The wayfinder map was migrated to GitHub issues on 2026-09-12 — map is #5, tickets #1–#7. The local `.scratch/` files were removed; research findings (launchctl persistence, prior art) remain retrievable from git history (initial commit `e7289aa`, under `.scratch/macos-env-setter/research/`).
 
 ## Conventions
 
