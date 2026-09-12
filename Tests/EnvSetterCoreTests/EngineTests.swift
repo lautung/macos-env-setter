@@ -1,0 +1,252 @@
+import Testing
+import Foundation
+@testable import EnvSetterCore
+
+struct EngineTests {
+    @Test func freshSandboxLoadsEmpty() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        let engine = EnvSetterEngine(paths: paths)
+        let result = try engine.load()
+        #expect(result.entries.isEmpty)
+        #expect(!result.driftDetected)
+        #expect(!result.adoptedExistingBlock)
+        #expect(!result.hasMarkerBlock)
+        #expect(try engine.checkDrift() == false)
+    }
+
+    @Test func adoptAndApplyWritesBlockCommentsOutsideAndSavesStore() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        let written = try TestSupport.read(paths.zprofileURL)
+        // 块外：原行注释、原注释与空行保留
+        #expect(written.contains("# export TOOLS="))
+        #expect(written.contains("# export PATH="))
+        #expect(written.contains("# OpenCode CLI"))
+        // 块内：typeset + 按声明顺序导出
+        #expect(written.contains(MarkerBlock.typesetLine))
+        let location = try MarkerBlock.locate(in: written)
+        #expect(location != nil)
+
+        // 本地状态：条目与快照都落了盘
+        let store = try StorePersistence.load(from: paths.storeURL)
+        #expect(store.entries == plan.entries)
+        #expect(store.blockSnapshot == location?.fullText)
+        #expect(try engine.checkDrift() == false)
+
+        // 备份：基线 + 时间戳各一份，基线内容 = 收编前原文
+        let backups = try engine.backupsList()
+        #expect(backups.filter(\.isBaseline).count == 1)
+        let baseline = backups.first { $0.isBaseline }!
+        #expect(try TestSupport.read(baseline.url) == Fixtures.adoptionFile)
+    }
+
+    @Test func applyIsIdempotentWhenNothingChanged() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        let first = try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        let secondPlan = try engine.planAdoption()
+        #expect(secondPlan.outsideEdits.isEmpty)
+        let second = try engine.apply(entries: secondPlan.entries)
+        #expect(second == first)
+        #expect(try TestSupport.read(paths.zprofileURL) == first)
+    }
+
+    @Test func manualBlockEditTriggersDriftAndFileWins() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        var plan = try engine.planAdoption()
+        // 给 JAVA_HOME 开 GUI（模拟用户在应用内的编辑）
+        for index in plan.entries.indices {
+            if case .record(var record) = plan.entries[index], record.key == "JAVA_HOME" {
+                record.guiEnabled = true
+                plan.entries[index] = .record(record)
+            }
+        }
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        // 手工改块内 MAVEN_HOME 的值，再加一行无法解析的行
+        let content = try TestSupport.read(paths.zprofileURL)
+        let edited = content
+            .replacingOccurrences(of: #"export MAVEN_HOME="$TOOLS/maven/apache-maven-3""#,
+                                  with: #"export MAVEN_HOME="$TOOLS/maven/apache-maven-4""#)
+            .replacingOccurrences(of: MarkerBlock.endMarker,
+                                  with: "export WEIRD=a b\n\(MarkerBlock.endMarker)")
+        try TestSupport.write(edited, to: paths.zprofileURL)
+
+        #expect(try engine.checkDrift() == true)
+        let result = try engine.load()
+        #expect(result.driftDetected)
+        #expect(try engine.checkDrift() == false) // 重载后快照已更新
+
+        let records = result.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let record) = entry { return record }
+            return nil
+        }
+        let maven = records.first { $0.key == "MAVEN_HOME" }
+        #expect(maven?.rawValue == "$TOOLS/maven/apache-maven-4")
+        // GUI 开关按 key 保留
+        let java = records.first { $0.key == "JAVA_HOME" }
+        #expect(java?.guiEnabled == true)
+        // 无法解析的行逐字保留为 verbatim 条目
+        #expect(result.entries.contains { entry in
+            if case .verbatim(let line) = entry { return line == "export WEIRD=a b" }
+            return false
+        })
+
+        // 再应用：verbatim 原样写回，文件与载入后的期望一致
+        _ = try engine.apply(entries: result.entries)
+        let rewritten = try TestSupport.read(paths.zprofileURL)
+        #expect(rewritten.contains("export WEIRD=a b"))
+        #expect(rewritten.contains(#"export MAVEN_HOME="$TOOLS/maven/apache-maven-4""#))
+    }
+
+    @Test func applyThrowsWhenDriftedUntilLoad() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        // 手工加一行
+        let content = try TestSupport.read(paths.zprofileURL)
+        try TestSupport.write(content + "\n# 手工备注\n", to: paths.zprofileURL)
+        // 块未动 → 不算漂移
+        #expect(try engine.checkDrift() == false)
+
+        // 动块 → apply 必须先被拦下
+        let edited = content.replacingOccurrences(
+            of: MarkerBlock.typesetLine,
+            with: MarkerBlock.typesetLine + "\n# 手工改过块"
+        )
+        try TestSupport.write(edited, to: paths.zprofileURL)
+        #expect(throws: EngineError.driftDetected.self) {
+            try engine.apply(entries: plan.entries)
+        }
+        _ = try engine.load() // 以文件为准重载
+        _ = try engine.apply(entries: plan.entries) // 现在可以应用了
+    }
+
+    @Test func applyThrowsWhenOutsideLinesChangedSincePlan() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+
+        var content = Fixtures.adoptionFile
+        let first = plan.outsideEdits[0]
+        content = FileText(content).replacingLine(at: first.lineIndex, with: first.originalLine + " # 改过")
+        try TestSupport.write(content, to: paths.zprofileURL)
+
+        #expect(throws: EngineError.fileChangedSincePlan.self) {
+            try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+        }
+    }
+
+    @Test func deletingWholeBlockDisablesShellLayerOnReload() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        // 用户把块整个删了，只留注释行
+        let content = try TestSupport.read(paths.zprofileURL)
+        let location = try MarkerBlock.locate(in: content)!
+        let stripped = content
+            .replacingOccurrences(of: location.fullText + "\n", with: "")
+        try TestSupport.write(stripped, to: paths.zprofileURL)
+
+        let result = try engine.load()
+        #expect(result.driftDetected)
+        #expect(!result.hasMarkerBlock)
+        let records = result.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let record) = entry { return record }
+            return nil
+        }
+        #expect(records.allSatisfy { !$0.shellEnabled })
+        #expect(records.allSatisfy { $0.key != "PATH" } == false) // PATH 记录仍在，只是 shell 关
+    }
+
+    @Test func atomicWritePreservesPermissions() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        let url = try TestSupport.write("a=1\n", to: paths.zprofileURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        _ = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1"))])
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        #expect((attrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o600)
+    }
+
+    @Test func atomicWriteFollowsSymlinkInsteadOfReplacingIt() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let target = home.appending(path: "dotfiles/zprofile.real")
+        try TestSupport.write(Fixtures.adoptionFile, to: target)
+        let linkURL = paths.zprofileURL
+        try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: target)
+
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        let stillSymlink = (try FileManager.default.attributesOfItem(atPath: linkURL.path)[.type] as? FileAttributeType) == .typeSymbolicLink
+        #expect(stillSymlink)
+        #expect(try TestSupport.read(target).contains(MarkerBlock.beginMarker))
+        #expect(try TestSupport.read(target).contains("# export TOOLS="))
+    }
+
+    @Test func restoreBaselineReturnsFileToPreAdoptionState() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write(Fixtures.adoptionFile, to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.load()
+        let plan = try engine.planAdoption()
+        try engine.apply(entries: plan.entries, outsideEdits: plan.outsideEdits)
+
+        let backups = try engine.backupsList()
+        let baseline = backups.first { $0.isBaseline }!
+        try engine.restore(from: baseline)
+
+        #expect(try TestSupport.read(paths.zprofileURL) == Fixtures.adoptionFile)
+        let result = try engine.load()
+        #expect(!result.hasMarkerBlock)
+        // 块没了：shell 层停用，但记录还在（可再开启）
+        let records = result.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let record) = entry { return record }
+            return nil
+        }
+        #expect(!records.isEmpty)
+        #expect(records.allSatisfy { !$0.shellEnabled })
+    }
+
+    @Test func storeRoundTripsThroughJSON() throws {
+        let (home, _) = try TestSupport.makeSandbox()
+        let store = EnvStore(
+            entries: [
+                .record(VariableRecord(key: "A", rawValue: "$B/${B:-x}", source: .adopted)),
+                .record(VariableRecord(key: "B", rawValue: "1", guiEnabled: true, source: .toolCreated)),
+                .verbatim(line: "# keep me"),
+            ],
+            blockSnapshot: "# >>> EnvSetter >>>\n...\n# <<< EnvSetter <<<"
+        )
+        let url = home.appending(path: "store.json")
+        try StorePersistence.save(store, to: url)
+        #expect(try StorePersistence.load(from: url) == store)
+    }
+}
