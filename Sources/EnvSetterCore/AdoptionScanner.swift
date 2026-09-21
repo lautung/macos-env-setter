@@ -90,6 +90,8 @@ public enum AdoptionScanner {
                         rawValue: parsed.rawValue,
                         shellEnabled: true,
                         guiEnabled: false,
+                        // 一眼是凭据的 key 默认打码；只是展示偏好，判断错了用户取消勾选即可。
+                        secret: SecretKeys.looksSecret(parsed.key),
                         source: .adopted,
                         quoteStyle: parsed.quoteStyle
                     )

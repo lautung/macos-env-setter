@@ -1,0 +1,604 @@
+import EnvSetterCore
+import EnvSetterUI
+import Foundation
+import Testing
+
+@MainActor
+struct AppModelTests {
+    // MARK: - 载入与草稿
+
+    @Test func emptySandboxStartsClean() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+
+        #expect(harness.model.entries.isEmpty)
+        #expect(harness.model.rows.isEmpty)
+        #expect(harness.model.pendingCount == 0)
+        #expect(!harness.model.canApply)
+        #expect(harness.model.selectedRecord == nil)
+    }
+
+    @Test func addingARecordMakesItPending() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+
+        harness.model.addRecord(key: "FOO", rawValue: "$HOME/foo", shellEnabled: true, guiEnabled: false, secret: false)
+
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.canApply)
+        #expect(harness.model.selection == "FOO")
+        #expect(harness.model.rows.count == 1)
+        #expect(harness.model.rows.first?.record?.record.key == "FOO")
+        #expect(harness.model.rows.first?.record?.status == .pending)
+        // 还没应用：文件里什么都没有
+        #expect(!FileManager.default.fileExists(atPath: harness.paths.zprofileURL.path))
+    }
+
+    @Test func applyWritesBothLayersAndClearsPending() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "JAVA_HOME", rawValue: "$TOOLS/jdk", shellEnabled: true, guiEnabled: true, secret: false)
+        harness.model.addRecord(key: "TOOLS", rawValue: "/opt/tools", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.moveRecord("TOOLS", by: -1) // 引用者排在被引用者之后
+
+        await harness.model.apply()
+
+        #expect(harness.model.pendingCount == 0)
+        #expect(!harness.model.canApply)
+
+        let content = try harness.profileContent
+        #expect(content.contains(MarkerBlock.beginMarker))
+        #expect(content.contains("export TOOLS=\"/opt/tools\""))
+        #expect(content.contains("export JAVA_HOME=\"$TOOLS/jdk\""))
+        // 声明顺序即写入顺序
+        let toolsIndex = try #require(content.range(of: "export TOOLS=")).lowerBound
+        let javaIndex = try #require(content.range(of: "export JAVA_HOME=")).lowerBound
+        #expect(toolsIndex < javaIndex)
+
+        // GUI 层脚本里只有开了 GUI 的那一条
+        let script = try UITestSupport.read(harness.paths.guiScriptURL)
+        #expect(script.contains("JAVA_HOME"))
+        #expect(!script.contains("/bin/launchctl setenv TOOLS"))
+
+        // 横幅讲清生效语义
+        let banner = try #require(harness.model.banner)
+        #expect(banner.kind == .info)
+        #expect(banner.text.contains("只影响之后新启动的 App"))
+        #expect(harness.model.lastAppliedText != nil)
+    }
+
+    @Test func editsAreRevertedByReload() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+
+        harness.model.setRawValue("2", for: "FOO")
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.rowStatus(for: "FOO") == .pending)
+
+        await harness.model.reload()
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.entries.record(named: "FOO")?.rawValue == "1")
+        #expect(try harness.profileContent.contains("export FOO=\"1\""))
+    }
+
+    @Test func reloadWithPendingChangesAsksFirst() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+        harness.model.setRawValue("2", for: "FOO")
+
+        harness.model.requestReload()
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.action == .reloadFromDisk)
+        #expect(dialog.isDestructive)
+
+        await harness.model.perform(dialog)
+        #expect(harness.model.dialog == nil)
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.entries.record(named: "FOO")?.rawValue == "1")
+    }
+
+    @Test func duplicateKeyBlocksApply() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+
+        // 界面上改名会先校验，这里直接构造出重复状态，验证「挡住应用」这层兜底
+        harness.model.addRecord(key: "FOO", rawValue: "2", shellEnabled: true, guiEnabled: false, secret: false)
+        #expect(harness.model.validationIssues["FOO"] != nil)
+        #expect(!harness.model.canApply)
+
+        harness.model.setKey("1BAD", for: "FOO")
+        #expect(harness.model.validationIssues["1BAD"] != nil)
+        #expect(!harness.model.canApply)
+    }
+
+    @Test func renameKeepsSelectionAndValidates() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+        harness.model.select("FOO")
+
+        #expect(harness.model.issueForRename("BAR", from: "FOO") == nil)
+        #expect(harness.model.issueForRename("1BAD", from: "FOO") != nil)
+
+        harness.model.setKey("BAR", for: "FOO")
+        #expect(harness.model.selection == "BAR")
+        #expect(harness.model.entries.record(named: "BAR")?.rawValue == "1")
+        // 记录的标识就是变量名，改名对文件而言就是「删一条、加一条」——界面上也是这么显示的
+        #expect(harness.model.pendingCount == 2)
+        #expect(harness.model.rows.contains { if case .removed(let row) = $0 { return row.record.key == "FOO" } else { return false } })
+    }
+
+    // MARK: - 删除与撤销
+
+    @Test func removalIsTwoStepAndUndoable() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("A", "1")
+        await harness.addApplied("B", "2")
+
+        harness.model.requestDelete("A")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.action == .deleteRecord("A"))
+        await harness.model.perform(dialog)
+
+        // 列表里划掉显示，文件里还在
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.rows.contains { if case .removed(let row) = $0 { return row.record.key == "A" } else { return false } })
+        #expect(try harness.profileContent.contains("export A="))
+
+        harness.model.undoRemoval("A")
+        #expect(harness.model.pendingCount == 0) // 撤销插回原位，连顺序都不算改动
+        #expect(harness.model.entries.record(named: "A")?.rawValue == "1")
+    }
+
+    @Test func removingAnUnappliedRecordLeavesNothingPending() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "TEMP", rawValue: "x", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("TEMP")
+        await harness.model.perform(try #require(harness.model.dialog))
+
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.rows.isEmpty)
+        // 没应用过的记录直接消失即可，不必提示「待生效」
+        #expect(harness.model.banner == nil)
+    }
+
+    // MARK: - 漂移
+
+    @Test func driftIsReportedAndReloadedFromFile() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+
+        // 手工改块内内容
+        let content = try harness.profileContent
+        try harness.writeProfile(
+            content.replacingOccurrences(of: "export FOO=\"1\"", with: "export FOO=\"2\"")
+        )
+
+        harness.model.setRawValue("3", for: "FOO")
+        await harness.model.apply()
+
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.action == .reloadFromDisk)
+        #expect(dialog.message.contains("漂移"))
+
+        await harness.model.perform(dialog)
+        #expect(harness.model.entries.record(named: "FOO")?.rawValue == "2") // 以文件为准
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.banner?.kind == .warning)
+    }
+
+    @Test func loadReportsDriftAndAdoptedBlock() async throws {
+        let harness = try Harness()
+        try harness.writeProfile(
+            """
+            # 块外备注
+            \(MarkerBlock.beginMarker)
+            export FOO="1"
+            \(MarkerBlock.endMarker)
+            """
+        )
+
+        await harness.model.start()
+
+        #expect(harness.model.entries.record(named: "FOO")?.rawValue == "1")
+        #expect(harness.model.rows.contains { if case .verbatim = $0 { return true } else { return false } } == false)
+        let banner = try #require(harness.model.banner)
+        #expect(banner.kind == .info)
+        #expect(banner.text.contains("收编为当前状态"))
+    }
+
+    @Test func verbatimLinesAreShownReadOnly() async throws {
+        let harness = try Harness()
+        try harness.writeProfile(
+            """
+            \(MarkerBlock.beginMarker)
+            export FOO="1"
+            export WEIRD=a b
+            \(MarkerBlock.endMarker)
+            """
+        )
+        await harness.model.start()
+
+        let verbatim = harness.model.rows.compactMap { row -> VerbatimRow? in
+            if case .verbatim(let row) = row { return row }
+            return nil
+        }
+        #expect(verbatim.map(\.line) == ["export WEIRD=a b"])
+        // 搜索时逐字保留行先不显示（它们没有变量名可比）
+        harness.model.search = "FOO"
+        #expect(harness.model.rows.count == 1)
+    }
+
+    // MARK: - 搜索与打码
+
+    @Test func searchMatchesKeysOnly() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("GITHUB_TOKEN", "ghp_1a2b3c4d5e6f7g8h")
+        await harness.addApplied("EDITOR", "nvim")
+
+        harness.model.search = "github"
+        #expect(harness.model.rows.map(\.id) == ["record:GITHUB_TOKEN"])
+
+        // 值不参与搜索：搜索框不该成为绕过打码的探针
+        harness.model.search = "ghp_"
+        #expect(harness.model.rows.isEmpty)
+    }
+
+    @Test func secretRowsAreMaskedUntilRevealed() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(
+            key: "API_TOKEN", rawValue: "sk-proj-9f3a81c7", shellEnabled: true, guiEnabled: false, secret: true
+        )
+
+        var row = try #require(harness.model.rows.first?.record)
+        #expect(row.preview == "sk-p" + SecretMasking.mask)
+
+        harness.model.toggleReveal("API_TOKEN")
+        row = try #require(harness.model.rows.first?.record)
+        #expect(row.preview == "sk-proj-9f3a81c7")
+
+        // 换一条记录即重新打码
+        harness.model.select(nil)
+        row = try #require(harness.model.rows.first?.record)
+        #expect(row.preview == "sk-p" + SecretMasking.mask)
+    }
+
+    /// 打码标记不进两层的写入内容，所以它不该标「待生效」，而是立刻单独存起来。
+    @Test func secretFlagPersistsWithoutApply() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+
+        harness.model.setSecret(true, for: "FOO")
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.rows.first?.record?.status == .synced)
+
+        // 标记当场落进本地状态（不等「应用」）
+        let stored = try harness.storedEntries().record(named: "FOO")
+        #expect(stored?.secret == true)
+        // 标记块没被这次写入碰到
+        #expect(!(try harness.profileContent.contains("secret")))
+
+        // 重新载入后仍然是打码状态
+        await harness.model.reload()
+        #expect(harness.model.entries.record(named: "FOO")?.secret == true)
+    }
+
+    @Test func newRecordSheetPrechecksCredentialLookingKeys() {
+        #expect(SecretKeys.looksSecret("STRIPE_SECRET_KEY"))
+        #expect(!SecretKeys.looksSecret("LANG"))
+    }
+
+    // MARK: - PATH 编辑器
+
+    @Test func pathEditsRewriteTheRecord() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH")
+
+        #expect(harness.model.pathRows.map(\.text) == ["/a", "$PATH"])
+        #expect(harness.model.pathHasAnchor)
+
+        harness.model.addPathRow("/b")
+        #expect(harness.model.pathRecord?.rawValue == "/a:$PATH:/b")
+        #expect(harness.model.pendingCount == 1)
+
+        harness.model.nudgePathRow(at: 0, by: 1)
+        #expect(harness.model.pathRows.map(\.text) == ["$PATH", "/a", "/b"])
+        #expect(harness.model.pathRecord?.rawValue == "$PATH:/a:/b")
+
+        harness.model.movePathRows(from: IndexSet(integer: 1), to: 0)
+        #expect(harness.model.pathRows.map(\.text) == ["/a", "$PATH", "/b"])
+
+        harness.model.removePathRow(at: 0)
+        #expect(harness.model.pathRecord?.rawValue == "$PATH:/b")
+
+        await harness.model.apply()
+        #expect(try harness.profileContent.contains("export PATH=\"$PATH:/b\""))
+    }
+
+    @Test func anchorIsProtectedUnlessDuplicated() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH")
+
+        #expect(!harness.model.canRemovePathRow(at: 1)) // 唯一的锚点不给删
+        harness.model.addPathRow("$PATH")
+        #expect(harness.model.pathAnchorWarning != nil)
+        #expect(harness.model.canRemovePathRow(at: 1))
+
+        harness.model.commitPathRows()
+        #expect(harness.model.pathRows.map(\.isAnchor) == [false, true, true])
+    }
+
+    @Test func addingAnchorWhenMissing() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:/b")
+
+        #expect(!harness.model.pathHasAnchor)
+        harness.model.addPathAnchor()
+        #expect(harness.model.pathRecord?.rawValue == "/a:/b:$PATH")
+    }
+
+    @Test func duplicatePathEntriesAreFlagged() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/usr/local/bin:/USR/local/bin:$PATH")
+
+        #expect(harness.model.pathDuplicateIDs.count == 2)
+    }
+
+    @Test func pathRowEditsDoNotChurnWhenSemanticsAreUnchanged() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:${PATH}")
+
+        // 单纯的失焦提交不该把 ${PATH} 重排成 $PATH、白标一次「待生效」
+        harness.model.commitPathRows()
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.pathRecord?.rawValue == "/a:${PATH}")
+    }
+
+    @Test func singleQuotedPathIsFlaggedBeforeEditing() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "PATH", rawValue: "/a:$PATH", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.setQuoteStyle(.single, for: "PATH")
+        #expect(harness.model.pathQuoteWarning != nil)
+
+        // 用编辑器改动后换成双引号（锚点必须展开）
+        harness.model.addPathRow("/b")
+        #expect(harness.model.pathRecord?.quoteStyle == .double)
+        #expect(harness.model.pathQuoteWarning == nil)
+    }
+
+    /// 删到一条不剩也是合法的（空 PATH = 整条替换），不能被「防误写空」的兜底挡回来。
+    @Test func lastPathEntryCanBeRemoved() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a")
+
+        #expect(harness.model.pathRows.count == 1)
+        harness.model.removePathRow(harness.model.pathRows[0].id)
+        #expect(harness.model.pathRows.isEmpty)
+        #expect(harness.model.pathRecord?.rawValue == "")
+        #expect(harness.model.pendingCount == 1)
+        // 没有锚点时界面会提醒「整条 PATH 会被替换」
+        #expect(!harness.model.pathHasAnchor)
+    }
+
+    /// 改名进出 PATH：行草稿必须跟着重建，否则下一次行编辑会写进已经不属于 PATH 的记录。
+    @Test func renamingIntoAndOutOfPathResyncsRows() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "$HOME/foo")
+        await harness.addApplied("PATH", "/a")
+
+        harness.model.setKey("OLDPATH", for: "PATH")
+        #expect(harness.model.pathRows.isEmpty)
+
+        harness.model.setKey("PATH", for: "FOO")
+        #expect(harness.model.pathRows.map(\.text) == ["$HOME/foo"])
+
+        harness.model.addPathRow("/b")
+        #expect(harness.model.pathRecord?.rawValue == "$HOME/foo:/b")
+        // 原来的 OLDPATH 记录没被这次编辑碰到
+        #expect(harness.model.entries.record(named: "OLDPATH")?.rawValue == "/a")
+    }
+
+    /// 顺序变了也是「待生效」：每条记录在文件里的位置都变了。
+    @Test func reorderingMarksRowsPending() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("A", "1")
+        await harness.addApplied("B", "2")
+
+        harness.model.moveRecord("B", by: -1)
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.structureChanged)
+        #expect(harness.model.rowStatus(for: "A") == .pending)
+        #expect(harness.model.rowStatus(for: "B") == .pending)
+        #expect(harness.model.rows.allSatisfy { $0.record?.status == .pending })
+    }
+
+    // MARK: - 收编
+
+    @Test func adoptionPlanIsShownThenApplied() async throws {
+        let harness = try Harness()
+        try harness.writeProfile(UITestSupport.adoptionFile)
+        await harness.model.start()
+
+        await harness.model.planAdoption()
+        #expect(harness.model.sheet == .adoption)
+        let plan = try #require(harness.model.adoptionPlan)
+        #expect(plan.adoptedKeys == ["TOOLS", "JAVA_HOME", "GITHUB_TOKEN"])
+        #expect(plan.mergedPathLineCount == 2)
+        // 一眼是凭据的 key 默认打码
+        #expect(plan.entries.record(named: "GITHUB_TOKEN")?.secret == true)
+        #expect(plan.entries.record(named: "TOOLS")?.secret == false)
+
+        await harness.model.confirmAdoption()
+        #expect(harness.model.sheet == nil)
+        #expect(harness.model.pendingCount == 0)
+
+        let content = try harness.profileContent
+        #expect(content.contains("# export TOOLS="))
+        #expect(content.contains("export JAVA_HOME=\"$TOOLS/jdk-21\""))
+        // PATH 合并成一条记录并排在最后（引用者要在被引用者之后）
+        let pathIndex = try #require(harness.model.entries.firstIndex { $0.key == "PATH" })
+        #expect(pathIndex == harness.model.entries.count - 1)
+        #expect(harness.model.entries.record(named: "PATH")?.rawValue == "/Users/tester/.opencode/bin:$TOOLS/bin:$PATH")
+        #expect(harness.model.banner?.text.contains("收编") == true)
+    }
+
+    @Test func adoptionWithNothingToAdoptJustSaysSo() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+
+        await harness.model.planAdoption()
+        #expect(harness.model.sheet == nil)
+        #expect(harness.model.adoptionPlan == nil)
+        #expect(harness.model.banner?.text.contains("没有可收编") == true)
+    }
+
+    // MARK: - 备份与恢复
+
+    @Test func backupsAreListedAndRestorable() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1")
+        await harness.addApplied("BAR", "2")
+
+        await harness.model.openBackups()
+        #expect(harness.model.sheet == .backups)
+        #expect(!harness.model.backups.isEmpty)
+
+        harness.model.requestRestore(try #require(harness.model.backups.last))
+        let dialog = try #require(harness.model.dialog)
+        #expect(harness.model.sheet == nil) // 确认框挂主窗口，面板先收起来
+        await harness.model.perform(dialog)
+
+        // 那份备份里只有 FOO：BAR 的 shell 行在文件里没了 → shell 层停用（记录留着，可再开启）
+        #expect(harness.model.entries.record(named: "FOO")?.shellEnabled == true)
+        #expect(harness.model.entries.record(named: "BAR")?.shellEnabled == false)
+        #expect(!(try harness.profileContent.contains("export BAR=")))
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.banner?.text.contains("覆盖") == true)
+    }
+
+    // MARK: - 诊断与重启
+
+    @Test func diagnosticsSheetCarriesChecks() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1", gui: true)
+
+        await harness.model.openDiagnostics()
+        #expect(harness.model.sheet == .diagnostics)
+        let diagnosis = try #require(harness.model.diagnosis)
+        #expect(diagnosis.checks.contains { $0.name == "GUI 层脚本" })
+        #expect(diagnosis.checks.contains { $0.name.contains("后台项") })
+    }
+
+    @Test func diagnosticsWithoutGuiLayerWarns() async throws {
+        let harness = try Harness(gui: false)
+        await harness.model.start()
+        await harness.model.openDiagnostics()
+        #expect(harness.model.sheet == nil)
+        #expect(harness.model.banner?.kind == .warning)
+    }
+
+    @Test func restartingAnAppReportsBothOutcomes() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        let app = RunningApp(name: "Safari", bundleIdentifier: "com.apple.Safari", bundleURL: URL(fileURLWithPath: "/Applications/Safari.app"), pid: 4242)
+        harness.apps.apps = [app]
+
+        harness.model.openRestartSheet()
+        #expect(harness.model.sheet == .restart)
+        #expect(harness.model.runningApps == [app])
+
+        await harness.model.restart(app)
+        #expect(harness.apps.restarted == [app])
+        #expect(harness.model.banner?.kind == .info)
+        #expect(harness.model.restartingPID == nil)
+
+        harness.apps.restartFailure = "「Safari」没有在 5 秒内退出（可能有未保存的文档）。已放弃重启。"
+        await harness.model.restart(app)
+        #expect(harness.model.banner?.kind == .warning)
+        #expect(harness.model.banner?.text.contains("放弃重启") == true)
+    }
+
+    @Test func loginItemsSettingsShortcutIsWired() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.openLoginItemsSettings()
+        #expect(harness.apps.openedLoginItemsSettings)
+    }
+
+    // MARK: - GUI 层失败只出横幅
+
+    @Test func guiLayerFailureSurfacesAsWarningBanner() async throws {
+        let harness = try Harness(gui: false)
+        await harness.model.start()
+        // 把 GUI 层脚本的父目录做成一个文件：脚本写入必然失败，shell 层不受影响。
+        let blocked = harness.home.appending(path: "blocked")
+        try UITestSupport.write("not a directory", to: blocked)
+        let paths = EnginePaths(
+            zprofileURL: harness.paths.zprofileURL,
+            storeURL: harness.paths.storeURL,
+            backupsDirectory: harness.paths.backupsDirectory,
+            launchAgentsDirectory: harness.paths.launchAgentsDirectory,
+            guiScriptURL: blocked.appending(path: "setenv.sh")
+        )
+        let model = AppModel(engine: EnvSetterEngine(paths: paths, gui: GuiLayer(paths: paths, runner: harness.runner)))
+        await model.start()
+        model.addRecord(key: "FOO", rawValue: "1", shellEnabled: true, guiEnabled: true, secret: false)
+
+        await model.apply()
+
+        #expect(try harness.profileContent.contains("export FOO=")) // shell 层照常写入
+        let banner = try #require(model.banner)
+        #expect(banner.kind == .warning)
+        #expect(banner.text.contains("GUI 层没做完"))
+        #expect(banner.text.contains("shell 层已写入"))
+        // 每次应用后的横幅都要讲清生效语义，失败的这次也不例外
+        #expect(banner.text.contains("只影响之后新启动的 App"))
+    }
+
+    // MARK: - 忙碌状态
+
+    @Test func commandsAreBlockedWhileBusy() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "FOO", rawValue: "1", shellEnabled: true, guiEnabled: false, secret: false)
+        #expect(harness.model.canApply)
+
+        async let applying: Void = harness.model.apply()
+        await applying
+
+        #expect(harness.model.busyLabel == nil)
+        #expect(!harness.model.isBusy)
+    }
+}
+
+// MARK: - 便于断言的取值
+
+private extension SidebarRow {
+    var record: RecordRow? {
+        if case .record(let row) = self { return row }
+        return nil
+    }
+}

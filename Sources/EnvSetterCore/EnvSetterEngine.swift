@@ -15,7 +15,8 @@ public struct ApplyResult: Equatable, Sendable {
 
 /// 引擎编排：载入（含漂移检测与以文件为准的重新载入）、收编计划、显式应用（备份 → 写标记块 → GUI 层）、恢复备份。
 /// shell 层（~/.zprofile 标记块）与本地状态由本类负责；GUI 层（LaunchAgent + setenv.sh）在注入 `GuiLayer` 后一并同步。
-public final class EnvSetterEngine {
+/// 全部存储属性都是不可变的 Sendable 值，可跨并发域使用（界面在自己的任务里调用它，不占主线程）。
+public final class EnvSetterEngine: Sendable {
     public let paths: EnginePaths
     /// GUI 层；为 nil 时引擎只写 shell 层（GUI 层失败不影响 shell 层写入，见 `apply`）。
     public let gui: GuiLayer?
@@ -158,6 +159,28 @@ public final class EnvSetterEngine {
         return ApplyResult(shellContent: newContent, gui: gui?.apply(entries: entries))
     }
 
+    // MARK: - 秘密值标记
+
+    /// 只更新本地状态里的「秘密值」标记，不碰标记块、不做备份。
+    /// 该标记只影响界面打码，不属于两层的写入内容，因此不走「显式应用」——改一次就存一次，
+    /// 否则用户标了秘密值却没点应用，重启界面后又会明文显示。
+    /// 本地状态里没有的 key（例如尚未应用的新记录）静默跳过：它的标记会随下一次应用落盘。
+    public func setSecretFlags(_ flags: [String: Bool]) throws {
+        guard FileManager.default.fileExists(atPath: paths.storeURL.path) else { return }
+        var store = try loadStore()
+        var changed = false
+        for index in store.entries.indices {
+            guard case .record(var record) = store.entries[index],
+                let secret = flags[record.key], secret != record.secret
+            else { continue }
+            record.secret = secret
+            store.entries[index] = .record(record)
+            changed = true
+        }
+        guard changed else { return }
+        try StorePersistence.save(store, to: paths.storeURL)
+    }
+
     // MARK: - 备份与恢复
 
     public func backupsList() throws -> [BackupInfo] {
@@ -206,9 +229,11 @@ public final class EnvSetterEngine {
                     record.rawValue = parsedRecord.rawValue // 值以文件为准
                     record.guiEnabled = existing.guiEnabled
                     record.source = existing.source
+                    record.secret = existing.secret // 秘密值标记属于本地状态，文件里没有
                 } else {
                     record.guiEnabled = false
                     record.source = .adopted
+                    record.secret = SecretKeys.looksSecret(record.key)
                 }
                 merged.append(.record(record))
             }

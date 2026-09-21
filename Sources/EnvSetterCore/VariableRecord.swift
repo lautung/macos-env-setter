@@ -22,6 +22,9 @@ public struct VariableRecord: Codable, Equatable, Sendable, Identifiable {
     public var shellEnabled: Bool
     /// GUI 层（launchctl）开关
     public var guiEnabled: Bool
+    /// 秘密值：只影响界面展示（列表与预览打码），不影响两层的写入内容。
+    /// 与 `guiEnabled`/`source` 一样属于本地状态，不写进标记块。
+    public var secret: Bool
     public var source: RecordSource
     public var quoteStyle: QuoteStyle
 
@@ -30,6 +33,7 @@ public struct VariableRecord: Codable, Equatable, Sendable, Identifiable {
         rawValue: String,
         shellEnabled: Bool = true,
         guiEnabled: Bool = false,
+        secret: Bool = false,
         source: RecordSource = .toolCreated,
         quoteStyle: QuoteStyle = .double
     ) {
@@ -37,6 +41,7 @@ public struct VariableRecord: Codable, Equatable, Sendable, Identifiable {
         self.rawValue = rawValue
         self.shellEnabled = shellEnabled
         self.guiEnabled = guiEnabled
+        self.secret = secret
         self.source = source
         self.quoteStyle = quoteStyle
     }
@@ -44,7 +49,7 @@ public struct VariableRecord: Codable, Equatable, Sendable, Identifiable {
     public var id: String { key }
 
     private enum CodingKeys: String, CodingKey {
-        case key, rawValue, shellEnabled, guiEnabled, source, quoteStyle
+        case key, rawValue, shellEnabled, guiEnabled, secret, source, quoteStyle
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,8 +59,23 @@ public struct VariableRecord: Codable, Equatable, Sendable, Identifiable {
         shellEnabled = try container.decode(Bool.self, forKey: .shellEnabled)
         guiEnabled = try container.decode(Bool.self, forKey: .guiEnabled)
         source = try container.decode(RecordSource.self, forKey: .source)
-        // 早期 store.json 没有该字段：缺省按双引号（展开引用）处理。
+        // 早期 store.json 没有这两个字段：缺省按「非秘密、双引号（展开引用）」处理。
+        secret = try container.decodeIfPresent(Bool.self, forKey: .secret) ?? false
         quoteStyle = try container.decodeIfPresent(QuoteStyle.self, forKey: .quoteStyle) ?? .double
+    }
+}
+
+/// 「秘密值」标记的启发式判断：收编用户既有配置时用，把一眼就是凭据的 key 默认打码。
+/// 只影响展示，判断错了代价是「多打一次码」，判断漏了才是真泄露——所以宁可宽一点。
+public enum SecretKeys {
+    static let patterns = [
+        "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY",
+        "ACCESS_KEY", "PRIVATE_KEY", "AUTH", "SESSION",
+    ]
+
+    public static func looksSecret(_ key: String) -> Bool {
+        let upper = key.uppercased()
+        return patterns.contains { upper.contains($0) }
     }
 }
 
