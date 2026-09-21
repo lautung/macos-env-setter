@@ -1,13 +1,29 @@
 import Foundation
 
-/// 引擎编排：载入（含漂移检测与以文件为准的重新载入）、收编计划、显式应用（备份 → 写标记块）、恢复备份。
-/// 只负责 shell 层（~/.zprofile 标记块）与本地状态；GUI 层（launchctl/LaunchAgent）在 GUI 层实现票接入。
+/// 一次显式应用的结果。
+public struct ApplyResult: Equatable, Sendable {
+    /// 本次写入 `~/.zprofile` 的完整内容。
+    public var shellContent: String
+    /// GUI 层（launchd）的同步结果；nil = 引擎未接入 GUI 层。
+    public var gui: GuiApplyReport?
+
+    public init(shellContent: String, gui: GuiApplyReport? = nil) {
+        self.shellContent = shellContent
+        self.gui = gui
+    }
+}
+
+/// 引擎编排：载入（含漂移检测与以文件为准的重新载入）、收编计划、显式应用（备份 → 写标记块 → GUI 层）、恢复备份。
+/// shell 层（~/.zprofile 标记块）与本地状态由本类负责；GUI 层（LaunchAgent + setenv.sh）在注入 `GuiLayer` 后一并同步。
 public final class EnvSetterEngine {
     public let paths: EnginePaths
+    /// GUI 层；为 nil 时引擎只写 shell 层（GUI 层失败不影响 shell 层写入，见 `apply`）。
+    public let gui: GuiLayer?
     private let backups: BackupManager
 
-    public init(paths: EnginePaths) {
+    public init(paths: EnginePaths, gui: GuiLayer? = nil) {
         self.paths = paths
+        self.gui = gui
         self.backups = BackupManager(backupsDirectory: paths.backupsDirectory)
     }
 
@@ -70,16 +86,26 @@ public final class EnvSetterEngine {
         return try AdoptionScanner.plan(fileContent: content, currentEntries: store.entries)
     }
 
+    // MARK: - GUI 层诊断
+
+    /// 只读体检：脚本 / LaunchAgent / 注册状态 / 后台项开关 / gui 域里的注入值逐项检查。
+    /// 以本地状态里的作用层开关为准，不读也不改标记块——shell 层是否有漂移都不影响这份体检。
+    /// 引擎未接入 GUI 层时返回 nil。
+    public func guiDiagnosis() throws -> GuiDiagnosis? {
+        guard let gui else { return nil }
+        return gui.diagnose(entries: try loadStore().entries)
+    }
+
     // MARK: - 显式应用
 
     /// 显式应用：编辑只在内存，直到这里才一次性落盘。
-    /// 流程：漂移预检 → 基线/时间戳备份 → 原子写标记块（含收编的块外注释）→ 更新快照与本地状态。
-    /// 成功后返回本次写入的完整文件内容。
+    /// 流程：漂移预检 → 基线/时间戳备份 → 原子写标记块（含收编的块外注释）→ 更新快照与本地状态 → GUI 层同步。
+    /// GUI 层（launchd）是**非阻塞**的：它的失败以 `ApplyResult.gui.warning` 形式上报，不回滚 shell 层写入。
     @discardableResult
     public func apply(
         entries: [ManagedEntry],
         outsideEdits: [OutsideEdit] = []
-    ) throws -> String {
+    ) throws -> ApplyResult {
         try validate(entries: entries)
 
         var store = try loadStore()
@@ -127,7 +153,9 @@ public final class EnvSetterEngine {
         store.entries = entries
         store.blockSnapshot = newBlock
         try StorePersistence.save(store, to: paths.storeURL)
-        return newContent
+
+        // shell 层已落盘、状态已保存，之后才碰 launchd：GUI 层出问题也回不去影响上面。
+        return ApplyResult(shellContent: newContent, gui: gui?.apply(entries: entries))
     }
 
     // MARK: - 备份与恢复

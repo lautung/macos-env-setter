@@ -5,11 +5,23 @@ public struct EnginePaths: Sendable {
     public var zprofileURL: URL
     public var storeURL: URL
     public var backupsDirectory: URL
+    /// GUI 层：LaunchAgent plist 所在目录（`~/Library/LaunchAgents`）。
+    public var launchAgentsDirectory: URL
+    /// GUI 层：工具生成的注入脚本（`~/Library/Application Support/EnvSetter/setenv.sh`）。
+    public var guiScriptURL: URL
 
-    public init(zprofileURL: URL, storeURL: URL, backupsDirectory: URL) {
+    public init(
+        zprofileURL: URL,
+        storeURL: URL,
+        backupsDirectory: URL,
+        launchAgentsDirectory: URL,
+        guiScriptURL: URL
+    ) {
         self.zprofileURL = zprofileURL
         self.storeURL = storeURL
         self.backupsDirectory = backupsDirectory
+        self.launchAgentsDirectory = launchAgentsDirectory
+        self.guiScriptURL = guiScriptURL
     }
 
     public static func standard() -> EnginePaths {
@@ -18,34 +30,38 @@ public struct EnginePaths: Sendable {
 
     /// 把指定目录当作家目录，供测试使用。
     public static func sandboxed(home: URL) -> EnginePaths {
-        EnginePaths(
+        let applicationSupport = home.appending(path: "Library/Application Support/EnvSetter")
+        return EnginePaths(
             zprofileURL: home.appending(path: ".zprofile"),
-            storeURL: home
-                .appending(path: "Library/Application Support/EnvSetter/store.json"),
-            backupsDirectory: home.appending(path: ".env-setter/backups")
+            storeURL: applicationSupport.appending(path: "store.json"),
+            backupsDirectory: home.appending(path: ".env-setter/backups"),
+            launchAgentsDirectory: home.appending(path: "Library/LaunchAgents"),
+            guiScriptURL: applicationSupport.appending(path: SetenvScript.fileName)
         )
     }
 }
 
 /// 原子写：解析 symlink 后写真实目标（不破坏链接）、保留文件权限、临时文件 + 原子替换。
 public enum AtomicFile {
-    public static func write(_ data: Data, to url: URL) throws {
+    /// `mode` 为 nil 时保留目标文件原有权限（不存在则 0644）。
+    public static func write(_ data: Data, to url: URL, mode: mode_t? = nil) throws {
         let fm = FileManager.default
         // 解析整条路径上的 symlink，落到真实文件上写，避免 rename 把用户的链接替换掉。
         let destination = url.resolvingSymlinksInPath()
         let parent = destination.deletingLastPathComponent()
         try fm.createDirectory(at: parent, withIntermediateDirectories: true)
 
-        var mode: mode_t = 0o644
+        var permissions: mode_t = 0o644
         if let attrs = try? fm.attributesOfItem(atPath: destination.path),
             let fileMode = attrs[.posixPermissions] as? NSNumber
         {
-            mode = mode_t(truncating: fileMode)
+            permissions = mode_t(truncating: fileMode)
         }
+        if let mode { permissions = mode }
 
         let tmp = parent.appending(path: ".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
         try data.write(to: tmp)
-        chmod(tmp.path, mode)
+        chmod(tmp.path, permissions)
         defer { try? fm.removeItem(at: tmp) }
         _ = try fm.replaceItemAt(destination, withItemAt: tmp)
     }

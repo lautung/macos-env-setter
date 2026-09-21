@@ -61,12 +61,19 @@ public enum ShellLine {
     }
 
     /// 生成 `export KEY="value"`（`.double`）或 `export KEY='value'`（`.single`）。
+    public static func exportLine(key: String, rawValue: String, quoteStyle: QuoteStyle = .double) -> String {
+        "export " + assignment(key: key, rawValue: rawValue, quoteStyle: quoteStyle)
+    }
+
+    /// 生成不带 `export` 的赋值 `KEY="value"` / `KEY='value'`。
+    /// GUI 层脚本（`setenv.sh`）复用同一套引用语义，两层的 `$` 展开结果才一致。
+    ///
     /// 双引号内保留 `$` 引用原文（让其照常展开），只转义双引号语义中真正需要转义的字符：`\`、`"`、反引号。
     /// 单引号内一切字面：`$` 不展开，原样往返（单引号值本身不可能含 `'`）。
-    public static func exportLine(key: String, rawValue: String, quoteStyle: QuoteStyle = .double) -> String {
+    public static func assignment(key: String, rawValue: String, quoteStyle: QuoteStyle = .double) -> String {
         switch quoteStyle {
-        case .double: return "export \(key)=\(quotedValue(rawValue))"
-        case .single: return "export \(key)='\(rawValue)'"
+        case .double: return "\(key)=\(quotedValue(rawValue))"
+        case .single: return "\(key)='\(rawValue)'"
         }
     }
 

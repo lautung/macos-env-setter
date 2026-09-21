@@ -57,8 +57,8 @@ struct EngineTests {
         let secondPlan = try engine.planAdoption()
         #expect(secondPlan.outsideEdits.isEmpty)
         let second = try engine.apply(entries: secondPlan.entries)
-        #expect(second == first)
-        #expect(try TestSupport.read(paths.zprofileURL) == first)
+        #expect(second.shellContent == first.shellContent)
+        #expect(try TestSupport.read(paths.zprofileURL) == first.shellContent)
     }
 
     @Test func manualBlockEditTriggersDriftAndFileWins() throws {
@@ -191,6 +191,45 @@ struct EngineTests {
         _ = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1"))])
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         #expect((attrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o600)
+    }
+
+    @Test func applyWithoutGuiLayerReportsNoGuiResult() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        let engine = EnvSetterEngine(paths: paths)
+        let result = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))])
+        #expect(result.shellContent.contains("export A="))
+        #expect(result.gui == nil)
+        #expect(try engine.guiDiagnosis() == nil)
+    }
+
+    @Test func guiWriteFailureWarnsButStillWritesShellLayer() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        // 让 GUI 层脚本的父目录是一个文件：脚本写入必然失败，而 ~/.zprofile 与本地状态路径不受影响。
+        let blocked = home.appending(path: "blocked")
+        try TestSupport.write("not a directory", to: blocked)
+        let enginePaths = EnginePaths(
+            zprofileURL: paths.zprofileURL,
+            storeURL: paths.storeURL,
+            backupsDirectory: paths.backupsDirectory,
+            launchAgentsDirectory: paths.launchAgentsDirectory,
+            guiScriptURL: blocked.appending(path: "setenv.sh")
+        )
+        let engine = EnvSetterEngine(
+            paths: enginePaths,
+            gui: GuiLayer(paths: enginePaths, runner: FakeProcessRunner())
+        )
+
+        let result = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))])
+
+        // shell 层照常落盘，GUI 层以警告上报
+        #expect(try TestSupport.read(paths.zprofileURL).contains("export A="))
+        let gui = try #require(result.gui)
+        #expect(gui.outcome == .failed)
+        #expect(!gui.scriptWritten)
+        #expect(try #require(gui.warning).contains("shell 层写入不受影响"))
+        // 本地状态也照常保存
+        let store = try StorePersistence.load(from: paths.storeURL)
+        #expect(store.entries == [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))])
     }
 
     @Test func atomicWriteFollowsSymlinkInsteadOfReplacingIt() throws {

@@ -27,6 +27,11 @@ _Avoid_: 作用域、范围
 `~/.zprofile` 中由标记注释围起、工具独占读写的区域。块外内容工具永不触碰。
 _Avoid_: 管理区、托管块
 
+**GUI 层脚本**:
+工具生成、由 LaunchAgent 在每次登录时执行的 `setenv.sh`（`~/Library/Application Support/EnvSetter/`）。
+按声明顺序先做 shell 变量赋值、再逐条 `launchctl setenv`，使 `$` 引用在 GUI 层也照常展开；`setenv.sh --print` 只打印将要注入的 `KEY=VALUE`，供回读比对与诊断用。
+_Avoid_: 启动脚本、env 脚本
+
 **显式应用**:
 将内存中的编辑一次性写入两层（先备份）的动作。编辑本身只改内存，直到应用才落盘。
 _Avoid_: 保存、同步
