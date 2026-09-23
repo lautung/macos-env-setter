@@ -4,12 +4,13 @@ import Foundation
 
 /// LaunchAgent plist 的生成与比对。
 struct LaunchAgentTests {
-    @Test func plistHasLabelProgramArgumentsAndRunAtLoad() throws {
+    @Test func plistPinsPathAndCarriesLabelProgramArgumentsRunAtLoad() throws {
         let data = try LaunchAgent.plistData(label: "com.example.test", scriptPath: "/tmp/setenv.sh")
         let parsed = try #require(LaunchAgent.dictionary(from: data))
         #expect(parsed["Label"] as? String == "com.example.test")
         #expect(parsed["ProgramArguments"] as? [String] == ["/bin/sh", "/tmp/setenv.sh"])
         #expect(parsed["RunAtLoad"] as? Bool == true)
+        #expect(parsed["EnvironmentVariables"] as? [String: String] == ["PATH": LaunchAgent.defaultPath])
     }
 
     @Test func plistComparisonIgnoresKeyOrderAndFormatting() throws {
@@ -21,6 +22,7 @@ struct LaunchAgentTests {
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
+            <key>EnvironmentVariables</key><dict><key>PATH</key><string>\(LaunchAgent.defaultPath)</string></dict>
             <key>RunAtLoad</key><true/>
             <key>ProgramArguments</key>
             <array><string>/bin/sh</string><string>/tmp/setenv.sh</string></array>
@@ -46,6 +48,17 @@ struct LaunchAgentTests {
             )
         )
         #expect(LaunchAgent.label(inPlist: expected) == "com.example.test")
+    }
+
+    /// 没有 `EnvironmentVariables` 的旧 plist 不算当前内容——应用时会重写并重新注册。
+    /// 钉住的是升级路径：钉 PATH 之前装下的 agent 必须被认出来、被换掉，否则它会一直用域里已有的 PATH 重跑。
+    @Test func legacyPlistWithoutPinnedPathIsNotCurrent() throws {
+        let legacy = Fixtures.legacyPlist(label: "com.example.test", scriptPath: "/tmp/setenv.sh")
+        #expect(
+            !LaunchAgent.plistMatches(
+                existing: Data(legacy.utf8), label: "com.example.test", scriptPath: "/tmp/setenv.sh"
+            )
+        )
     }
 
     @Test func specialCharactersInPathSurviveRoundTrip() throws {

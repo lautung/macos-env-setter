@@ -22,6 +22,22 @@ enum Fixtures {
     static let nonPathKeys = [
         "TOOLS", "JAVA_HOME", "MAVEN_HOME", "SDK_HOME", "SDK_ROOT", "RUBYOPT",
     ]
+
+    /// 钉 PATH 之前装下的 plist：没有 `EnvironmentVariables`。
+    /// 用来验升级路径——`plistMatches` 应认出它不是当前内容，应用时重写并重新注册。
+    static func legacyPlist(label: String, scriptPath: String) -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key><string>\(label)</string>
+            <key>ProgramArguments</key><array><string>/bin/sh</string><string>\(scriptPath)</string></array>
+            <key>RunAtLoad</key><true/>
+        </dict>
+        </plist>
+        """
+    }
 }
 
 enum TestSupport {

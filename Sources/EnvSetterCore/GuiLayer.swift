@@ -128,11 +128,9 @@ public final class GuiLayer: Sendable {
     }
 
     /// 跑脚本时的子进程环境，与 launchd 给 agent 的环境对齐（HOME + 默认 PATH）。
-    /// 对齐是为了让「应用时即时注入」与「下次登录由 agent 重放」展开出同样的值。
-    ///
-    /// 对齐的是**登录时**那一次重放。固定 PATH 是刻意的：期望值只取决于配置，不取决于跑脚本的进程
-    /// 恰好继承到什么。代价是会话中重跑 agent（重注册触发 `RunAtLoad`）时它继承到的是 gui 域的实时 PATH，
-    /// `$PATH` 会解析成那个值，与这里算出的期望值不同——回读据此告警（见 ADR-0001「期望值的环境」）。
+    /// 对齐是为了让「应用时即时注入」与「下次登录由 agent 重放」展开出同样的值：agent 那侧由 plist 的
+    /// `EnvironmentVariables` 钉住 PATH（见 `LaunchAgent.plistData`），这一侧在这里钉住。
+    /// 两侧都钉住，脚本的 `$PATH` 锚点才只取决于配置，不取决于跑脚本的进程恰好继承到什么。
     public static func launchdLikeEnvironment() -> [String: String] {
         let user = NSUserName()
         return [
@@ -252,8 +250,8 @@ public final class GuiLayer: Sendable {
             if !report.mismatches.isEmpty {
                 let names = report.mismatches.map(\.key).joined(separator: "、")
                 problems.append(
-                    "回读不一致：\(names)——GUI 域里的值不是脚本算出的值。"
-                    + "可能 agent 未随登录运行（登录项被系统设置关掉），请运行诊断查看。"
+                    "回读不一致：\(names)——GUI 域里的值不是脚本算出的值。期望值刚由本次应用写入，"
+                    + "读到别的值说明这次写入没生效、或之后被别的工具/手工改过。请运行诊断查看。"
                 )
             }
         }

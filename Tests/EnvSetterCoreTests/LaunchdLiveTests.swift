@@ -11,11 +11,10 @@ import Foundation
 ///
 /// 跑法：`ENVSETTER_LIVE_LAUNCHD=1 swift test --filter LaunchdLiveTests`
 ///
-/// 两条测试共用一个 label，故串行跑（`.serialized`）：并行会抢同一个注册。
-///
-/// 夹具分两种，因为**本工具自己启用 GUI 层之后，gui 域里就有它注入的 PATH 了**（本机常态，不是外来状态）：
-/// 回读自检与诊断用不依赖环境的取值，`$PATH` 锚点单独观察一条。
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["ENVSETTER_LIVE_LAUNCHD"] == "1"))
+/// 夹具里的 `$PATH` 取值与回读自检同处一条测试：plist 给 agent 钉住了 PATH（见 `LaunchAgent.plistData`），
+/// 所以「agent 重放」与「应用时即时注入」按同一个基线算，期望值对两个写入者都成立——本机 gui 域里
+/// 已有本工具注入的 PATH 也不影响。
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["ENVSETTER_LIVE_LAUNCHD"] == "1"))
 struct LaunchdLiveTests {
     private let label = "com.lautung.env-setter.acceptance"
     private let toolsPath = "/tmp/envsetter-acceptance-tools"
@@ -43,14 +42,6 @@ struct LaunchdLiveTests {
         for key in injectedKeys { _ = launchctl(["unsetenv", key]) }
     }
 
-    /// 域里的 PATH——agent 启动时继承到的就是它（脚本不写 PATH）。
-    ///
-    /// 不能写死 `LaunchAgent.defaultPath`：那是「gui 域里还没人设过 PATH」时的观察值，不是契约。
-    /// 契约是「脚本里的 `$PATH` 解析成 agent 继承到的 PATH」——域里没有 PATH 时它才等于 launchd 的默认值。
-    private func guiDomainPath() -> String {
-        getenv("PATH") ?? LaunchAgent.defaultPath
-    }
-
     /// 重新注册，让 agent 自己跑一遍脚本（`RunAtLoad`）。
     private func reRegisterAgent(_ layer: GuiLayer) {
         _ = launchctl(["bootout", "\(layer.domain)/\(label)"])
@@ -72,8 +63,6 @@ struct LaunchdLiveTests {
         tearDown(layer: layer)  // 上一轮若留下状态，先清干净
         defer { tearDown(layer: layer) }
 
-        // 取值都不依赖环境：agent 继承到的环境与 `GuiLayer.launchdLikeEnvironment` 算期望值用的环境
-        // 在这些 key 上一致，回读自检与诊断才断言得起。
         let entries: [ManagedEntry] = [
             .record(VariableRecord(key: "ENVSETTER_ACCEPT_TOOLS", rawValue: toolsPath, guiEnabled: true)),
             .record(
@@ -98,6 +87,14 @@ struct LaunchdLiveTests {
                     guiEnabled: true
                 )
             ),
+            // 非 PATH 的变量引用 `$PATH`：观察 `$PATH` 锚点在这一层解析成什么
+            .record(
+                VariableRecord(
+                    key: "ENVSETTER_ACCEPT_DEFAULT_PATH",
+                    rawValue: "$PATH",
+                    guiEnabled: true
+                )
+            ),
         ]
 
         let report = layer.apply(entries: entries)
@@ -111,6 +108,9 @@ struct LaunchdLiveTests {
         #expect(getenv("ENVSETTER_ACCEPT_JAVA_HOME") == "\(toolsPath)/jdk/jdk-21/Contents/Home")
         #expect(getenv("ENVSETTER_ACCEPT_LITERAL") == "pa$$word")
         #expect(getenv("ENVSETTER_ACCEPT_SELF") == "-rlogger")
+        // `$PATH` 锚点 = launchd 的默认 PATH（agent 的 PATH 由 plist 钉住，与域里已有的 PATH 无关），
+        // 不是终端里的 PATH。
+        #expect(getenv("ENVSETTER_ACCEPT_DEFAULT_PATH") == LaunchAgent.defaultPath)
 
         // 诊断全绿：脚本、plist、注册、后台项、注入值逐项通过
         let diagnosis = layer.diagnose(entries: entries)
@@ -127,42 +127,21 @@ struct LaunchdLiveTests {
         #expect(getenv("ENVSETTER_ACCEPT_JAVA_HOME") == nil)
 
         // 重新注册后 agent 自己跑一遍（RunAtLoad）会把值放回来。
-        // 先把值清掉再重注册——值还在的话，下面两条断言就算 agent 没跑也成立。
-        for key in ["ENVSETTER_ACCEPT_TOOLS", "ENVSETTER_ACCEPT_LITERAL"] {
+        // 先把值清掉再重注册——值还在的话，下面的断言就算 agent 没跑也成立。
+        // `ENVSETTER_ACCEPT_DEFAULT_PATH` 一并清掉：它由 agent 重放时算出，必须仍是 launchd 的默认 PATH。
+        // 这条的鉴别力取决于「域里的 PATH 不是默认值」——本工具启用 GUI 层后就是如此；域里没有 PATH 时
+        // 钉不钉住算出的都是默认值，那种机器上「plist 确实钉住了」由 `LaunchAgentTests` 的单测保证。
+        for key in ["ENVSETTER_ACCEPT_TOOLS", "ENVSETTER_ACCEPT_LITERAL", "ENVSETTER_ACCEPT_DEFAULT_PATH"] {
             _ = launchctl(["unsetenv", key])
         }
         reRegisterAgent(layer)
         waitUntil {
-            getenv("ENVSETTER_ACCEPT_TOOLS") == toolsPath && getenv("ENVSETTER_ACCEPT_LITERAL") == "pa$$word"
+            getenv("ENVSETTER_ACCEPT_TOOLS") == toolsPath
+                && getenv("ENVSETTER_ACCEPT_LITERAL") == "pa$$word"
+                && getenv("ENVSETTER_ACCEPT_DEFAULT_PATH") == LaunchAgent.defaultPath
         }
         #expect(getenv("ENVSETTER_ACCEPT_TOOLS") == toolsPath)
         #expect(getenv("ENVSETTER_ACCEPT_LITERAL") == "pa$$word")
-    }
-
-    /// GUI 层的 `$PATH` 锚点解析成 **agent 进程继承到的 PATH**，不是终端里的 PATH。
-    ///
-    /// 本机 gui 域里已经有本工具注入的 PATH（它自己写的），agent 继承到的通常**不是** launchd 的默认 PATH。
-    @Test func pathAnchorResolvesToThePathTheAgentInherits() throws {
-        let (_, paths) = try TestSupport.makeSandbox()
-        let layer = GuiLayer(paths: paths, label: label, uid: getuid())
-        tearDown(layer: layer)
-        defer { tearDown(layer: layer) }
-
-        let entries: [ManagedEntry] = [
-            .record(VariableRecord(key: "ENVSETTER_ACCEPT_DEFAULT_PATH", rawValue: "$PATH", guiEnabled: true))
-        ]
-
-        let inherited = guiDomainPath()
-        print("agent 继承到的 PATH = \(inherited)")
-
-        _ = layer.apply(entries: entries)
-        // 让 agent 自己跑一遍：它继承的是 gui 域的实时环境，而 apply 的即时注入用的是固定的
-        // launchd-like 环境（见 `GuiLayer.launchdLikeEnvironment`）——这一条要看的正是两者的差别。
-        // 先把值清掉再重注册：域里没有 PATH 的机器上两个环境算出的是同一个默认 PATH，
-        // 值还在的话这条断言就算 agent 没跑也成立。
-        _ = launchctl(["unsetenv", "ENVSETTER_ACCEPT_DEFAULT_PATH"])
-        reRegisterAgent(layer)
-        waitUntil { getenv("ENVSETTER_ACCEPT_DEFAULT_PATH") == inherited }
-        #expect(getenv("ENVSETTER_ACCEPT_DEFAULT_PATH") == inherited)
+        #expect(getenv("ENVSETTER_ACCEPT_DEFAULT_PATH") == LaunchAgent.defaultPath)
     }
 }
