@@ -286,13 +286,16 @@ public final class AppModel: ObservableObject {
         banner = Banner(kind: .info, text: "已添加 \(record.key)（待生效）——点「应用」才写入两层。")
     }
 
+    /// 移除一条记录的后果：只看已应用状态——写进两层的只有它（判定依据见 `RemovalImpact`）。
+    /// 确认框与移除后的提示条都从这里取口径，两处才不会各说一套。
+    public func removalImpact(for key: String) -> RemovalImpact {
+        RemovalImpact(key: key, saved: savedEntries.record(named: key))
+    }
+
     public func requestDelete(_ key: String) {
-        let applied = savedEntries.hasRecord(named: key)
         dialog = Dialog(
             title: "从列表移除「\(key)」？",
-            message: applied
-                ? "移除先只改内存；点「应用」后才会从 \(zprofileLabel) 的标记块里删掉这一行（应用前自动备份）。"
-                : "这条记录还没应用过，移除不会影响 \(zprofileLabel)。",
+            message: removalImpact(for: key).dialogMessage(zprofileLabel: zprofileLabel),
             confirmTitle: "移除",
             isDestructive: true,
             action: .deleteRecord(key)
@@ -300,15 +303,13 @@ public final class AppModel: ObservableObject {
     }
 
     public func deleteRecord(_ key: String) {
-        let applied = savedEntries.hasRecord(named: key)
+        let impact = removalImpact(for: key)
         entries.removeAll { $0.key == key }
         if selection == key { selection = nil }
         if revealedKey == key { revealedKey = nil }
-        if applied {
-            banner = Banner(
-                kind: .info,
-                text: "已从列表移除 \(key)（待生效）——点「应用」后才会从 \(zprofileLabel) 删除。"
-            )
+        // 只有已应用过的记录才会留下待生效改动（其余直接消失，没什么可说的）。
+        if impact.wasApplied {
+            banner = Banner(kind: .info, text: impact.bannerText(zprofileLabel: zprofileLabel))
         }
     }
 

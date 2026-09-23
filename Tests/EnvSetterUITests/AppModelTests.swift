@@ -169,6 +169,192 @@ struct AppModelTests {
         #expect(harness.model.banner == nil)
     }
 
+    // MARK: - 移除文案（按「移除后两层的写入内容是否会变」讲）
+
+    /// 两层都没启用的既有记录（真机上就是测试遗留的 DRIFT_PROBE）：
+    /// 移除只改列表与本地状态，文案不该再宣称要改动标记块。
+    @Test func removingARecordWithBothLayersOffSaysNothingIsWritten() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("DRIFT_PROBE", "byhand", shell: false, gui: false)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("DRIFT_PROBE")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.isDestructive)
+        #expect(dialog.message.contains("两层写入内容不变"))
+        #expect(!dialog.message.contains("会被删掉"))
+        #expect(!dialog.message.contains("这一行"))
+
+        await harness.model.perform(dialog)
+        let banner = try #require(harness.model.banner)
+        #expect(banner.kind == .info)
+        #expect(banner.text.contains("两层写入内容不变"))
+        #expect(!banner.text.contains("会被删掉"))
+        #expect(sameConsequence(dialog: dialog.message, banner: banner.text))
+
+        // 还没应用：文件一个字节都没动
+        #expect(try harness.profileContent.contains(MarkerBlock.beginMarker))
+        #expect(harness.model.pendingCount == 1)
+    }
+
+    /// 刚把开关打开、还没应用就移除：两层都还没有它的内容，文案不该宣称要删掉什么。
+    @Test func removingARecordWhoseNewToggleWasNeverAppliedSaysNothingChanges() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("LATER", "1", shell: false, gui: false)
+        harness.model.banner = nil
+        harness.model.setLayer(.shell, enabled: true, for: "LATER") // 待生效的开关，还没落盘
+
+        harness.model.requestDelete("LATER")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("两层写入内容不变"))
+        #expect(!dialog.message.contains("会被删掉"))
+    }
+
+    /// 反过来：已经写进标记块的行，不会因为「开关刚关掉、还没应用」就不算数。
+    @Test func removingARecordWhoseBlockLineIsAlreadyWrittenStillSaysItWillGo() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1", shell: true, gui: false)
+        harness.model.banner = nil
+        harness.model.setLayer(.shell, enabled: false, for: "FOO") // 待生效的开关，块里那一行还在
+
+        harness.model.requestDelete("FOO")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("标记块里这条记录对应的内容会被删掉"))
+
+        await harness.model.perform(dialog)
+        await harness.model.apply()
+        #expect(!(try harness.profileContent.contains("export FOO=")))
+    }
+
+    /// shell 层启用：点「应用」后标记块里对应内容会被删掉，应用前自动备份。
+    @Test func removingAShellLayerRecordSaysTheBlockContentWillGo() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1", shell: true, gui: false)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("FOO")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("标记块里这条记录对应的内容会被删掉"))
+        #expect(dialog.message.contains("应用前自动备份"))
+        #expect(!dialog.message.contains("gui 域"))
+
+        await harness.model.perform(dialog)
+        let banner = try #require(harness.model.banner)
+        #expect(banner.text.contains("标记块里这条记录对应的内容会被删掉"))
+        #expect(banner.text.contains("应用前自动备份"))
+        #expect(sameConsequence(dialog: dialog.message, banner: banner.text))
+
+        // 应用前文件里还在，应用后才真的删掉
+        #expect(try harness.profileContent.contains(#"export FOO="1""#))
+        await harness.model.apply()
+        #expect(!(try harness.profileContent.contains("export FOO=")))
+    }
+
+    /// GUI 层启用：应用时会从 gui 域里清掉，边界仍是「只清本工具写过的 key」。
+    @Test func removingAGuiLayerRecordSaysTheDomainKeyWillBeCleared() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("GUI_ONLY", "1", shell: false, gui: true)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("GUI_ONLY")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("从 gui 域（launchd）里清掉"))
+        #expect(dialog.message.contains("只清本工具写过的 key"))
+        #expect(!dialog.message.contains("会被删掉")) // 没碰标记块
+
+        await harness.model.perform(dialog)
+        let banner = try #require(harness.model.banner)
+        #expect(banner.text.contains("从 gui 域（launchd）里清掉"))
+        #expect(sameConsequence(dialog: dialog.message, banner: banner.text))
+
+        // 说了会清，就得真清
+        await harness.model.apply()
+        #expect(harness.runner.calls.contains { $0.arguments == ["unsetenv", "GUI_ONLY"] })
+    }
+
+    /// 两层都启用：两侧说法同时给出。
+    @Test func removingARecordEnabledInBothLayersSaysBoth() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("BOTH", "1", shell: true, gui: true)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("BOTH")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("标记块里这条记录对应的内容会被删掉"))
+        #expect(dialog.message.contains("应用前自动备份"))
+        #expect(dialog.message.contains("它还会从 gui 域（launchd）里清掉"))
+
+        await harness.model.perform(dialog)
+        let banner = try #require(harness.model.banner)
+        #expect(sameConsequence(dialog: dialog.message, banner: banner.text))
+    }
+
+    /// PATH 记录带的不止一个条目：文案不能只说「这一行」。
+    @Test func removingAPathRecordCoversItsMultipleLines() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH:/b", shell: true, gui: false)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("PATH")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("PATH 记录"))
+        #expect(dialog.message.contains("整串目录"))
+        #expect(dialog.message.contains("好几行"))
+        #expect(dialog.message.contains("应用前自动备份"))
+        #expect(!dialog.message.contains("这一行"))
+
+        await harness.model.perform(dialog)
+        let banner = try #require(harness.model.banner)
+        #expect(banner.text.contains("整串目录"))
+        #expect(sameConsequence(dialog: dialog.message, banner: banner.text))
+
+        await harness.model.apply()
+        #expect(!(try harness.profileContent.contains("export PATH=")))
+    }
+
+    /// 从未应用过的新记录：口径不变（还没应用过、不影响配置文件），也不留提示条。
+    @Test func removingANeverAppliedRecordKeepsTheNotAppliedWording() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "TEMP", rawValue: "x", shellEnabled: true, guiEnabled: true, secret: false)
+        harness.model.banner = nil
+
+        harness.model.requestDelete("TEMP")
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.message.contains("还没应用过"))
+        #expect(dialog.message.contains("移除不会影响"))
+        #expect(!dialog.message.contains("会被删掉"))
+
+        await harness.model.perform(dialog)
+        #expect(harness.model.banner == nil)
+        #expect(harness.model.pendingCount == 0)
+    }
+
+    /// 撤销回到原来的声明位置——撤销不该顺带引入一次顺序改动。
+    @Test func undoPutsTheRecordBackWhereItWasDeclared() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("A", "1")
+        await harness.addApplied("B", "2")
+        await harness.addApplied("C", "3")
+
+        harness.model.requestDelete("B")
+        await harness.model.perform(try #require(harness.model.dialog))
+        #expect(harness.model.entries.records.map(\.key) == ["A", "C"])
+
+        harness.model.undoRemoval("B")
+        #expect(harness.model.entries.records.map(\.key) == ["A", "B", "C"])
+        #expect(harness.model.pendingCount == 0)
+        #expect(harness.model.selection == "B")
+    }
+
     // MARK: - 漂移
 
     @Test func driftIsReportedAndReloadedFromFile() async throws {
@@ -601,4 +787,11 @@ private extension SidebarRow {
         if case .record(let row) = self { return row }
         return nil
     }
+}
+
+/// 确认框与移除后的提示条必须共用同一段后果说明：剥掉各自的引导语后应当逐字相同。
+private func sameConsequence(dialog: String, banner: String) -> Bool {
+    let lead = "移除先只改内存；"
+    let consequence = dialog.hasPrefix(lead) ? String(dialog.dropFirst(lead.count)) : dialog
+    return banner.hasSuffix(consequence)
 }

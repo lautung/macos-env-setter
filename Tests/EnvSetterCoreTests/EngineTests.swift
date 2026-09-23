@@ -193,6 +193,46 @@ struct EngineTests {
         #expect((attrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o600)
     }
 
+    /// 移除一条 GUI 层记录并应用：它的 key 要从 gui 域里清掉（界面上承诺的就是这件事）。
+    /// 边界不变：本工具没拥有过的 key（脚本里的外来行）一律不碰。
+    @Test func removingAGuiRecordClearsItsKeyFromTheDomain() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let engine = EnvSetterEngine(
+            paths: paths,
+            gui: GuiLayer(
+                paths: paths,
+                label: "com.example.envsetter-test",
+                runner: runner,
+                environment: ["HOME": home.path, "PATH": LaunchAgent.defaultPath],
+                uid: 501
+            )
+        )
+        let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
+        _ = try engine.apply(entries: [a, b])
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"]))
+
+        // 手工往工具自己的脚本里塞一行外来 key：它不在任何记录里，不该被清
+        let script = try TestSupport.read(paths.guiScriptURL)
+        try TestSupport.write(
+            script + "\n\(LaunchAgent.launchctlPath) setenv FOREIGN \"$FOREIGN\"\n",
+            to: paths.guiScriptURL
+        )
+
+        // B 被移除（草稿里不再有它）→ 应用后 gui 域里也不该留着它
+        let result = try engine.apply(entries: [a])
+
+        #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"]))
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "FOREIGN"]))
+        #expect(result.gui?.removedKeys == ["B"])
+
+        // 再应用一次：脚本里已经没有 B 了，不该重复清
+        let callsBefore = runner.calls.count
+        _ = try engine.apply(entries: [a])
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"], since: callsBefore))
+    }
+
     @Test func applyWithoutGuiLayerReportsNoGuiResult() throws {
         let (_, paths) = try TestSupport.makeSandbox()
         let engine = EnvSetterEngine(paths: paths)

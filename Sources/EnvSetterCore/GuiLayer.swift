@@ -80,7 +80,8 @@ public struct GuiDiagnosis: Equatable, Sendable {
 /// GUI 层（launchd 域）的读写：生成/重写 setenv.sh、装并注册 LaunchAgent、应用时即时注入当前会话、回读自检与诊断。
 ///
 /// 边界：本工具只拥有 `~/Library/LaunchAgents/<label>.plist` 与 `~/Library/Application Support/EnvSetter/setenv.sh`；
-/// 从不清除「不在自己记录里」的变量，避免踩到别的工具往 gui 域注入的同名变量。
+/// 从不清除「自己没拥有过」的变量（既不在当前记录里、也不在上次应用的记录里），
+/// 避免踩到别的工具往 gui 域注入的同名变量。
 public final class GuiLayer: Sendable {
     public let paths: EnginePaths
     public let label: String
@@ -127,12 +128,22 @@ public final class GuiLayer: Sendable {
     // MARK: - 同步
 
     /// 显式应用时的 GUI 层同步：写脚本 → 装/更新 LaunchAgent 并注册 → 立即注入当前会话 → 回读自检。
-    public func apply(entries: [ManagedEntry]) -> GuiApplyReport {
+    ///
+    /// `previouslyManagedKeys` 是上次应用时工具记录里的 key（由引擎从本地状态给出）。
+    /// 它让「这次被移除的记录」也算本工具拥有过——否则移除一条 GUI 记录后，
+    /// gui 域里会一直留着它的值，而界面上已经说了应用时会清掉。
+    /// 不传（= 空）时只清仍在记录里的 key：不知道自己的历史时，这是安全的子集。
+    public func apply(
+        entries: [ManagedEntry],
+        previouslyManagedKeys: Set<String> = []
+    ) -> GuiApplyReport {
         let enabled = SetenvScript.enabledKeys(entries: entries)
         let known = entries.compactMap(\.key)
         let previous = SetenvScript.appliedKeys(in: readString(paths.guiScriptURL) ?? "")
-        // 只清除本工具写过、且仍在记录里的 key —— 绝不动别的工具注入 gui 域的变量。
-        let removals = previous.filter { known.contains($0) && !enabled.contains($0) }
+        // 只清除本工具写过的 key：上次脚本注入过，且它当时或现在还在记录里。
+        let removals = previous.filter { key in
+            !enabled.contains(key) && (known.contains(key) || previouslyManagedKeys.contains(key))
+        }
 
         var report = GuiApplyReport(
             outcome: .skipped,

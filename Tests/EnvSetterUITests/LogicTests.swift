@@ -210,6 +210,59 @@ struct PathEditorTests {
     }
 }
 
+// MARK: - 移除的后果判定
+
+struct RemovalImpactTests {
+    private func record(_ key: String, shell: Bool, gui: Bool) -> VariableRecord {
+        VariableRecord(key: key, rawValue: "1", shellEnabled: shell, guiEnabled: gui)
+    }
+
+    /// 判定看的是「哪一层的已写入内容会变」，而写进两层的只有已应用状态。
+    @Test func layerInvolvementFollowsWhatIsAlreadyWritten() {
+        let shellOn = RemovalImpact(key: "A", saved: record("A", shell: true, gui: false))
+        #expect(shellOn.touchesShell)
+        #expect(!shellOn.touchesGui)
+
+        let guiOnly = RemovalImpact(key: "A", saved: record("A", shell: false, gui: true))
+        #expect(guiOnly.touchesGui)
+        #expect(!guiOnly.touchesShell)
+
+        // 两层都没启用的既有记录：移除不改动任何已写入的内容
+        let untouched = RemovalImpact(key: "DRIFT_PROBE", saved: record("DRIFT_PROBE", shell: false, gui: false))
+        #expect(untouched.wasApplied)
+        #expect(!untouched.touchesShell)
+        #expect(!untouched.touchesGui)
+        let message = untouched.dialogMessage(zprofileLabel: "~/.zprofile")
+        #expect(message.contains("两层写入内容不变"))
+        #expect(!message.contains("会被删掉"))
+    }
+
+    /// 从未应用过：两层都没写进过任何地方，口径是「还没应用过」。
+    @Test func neverAppliedRecordsSayNothingWasWritten() {
+        let impact = RemovalImpact(key: "NEW", saved: nil)
+        #expect(!impact.wasApplied)
+        #expect(!impact.touchesShell)
+        #expect(!impact.touchesGui)
+        let message = impact.dialogMessage(zprofileLabel: "~/.zprofile")
+        #expect(message.contains("还没应用过"))
+        #expect(message.contains("移除不会影响"))
+        #expect(!message.contains("会被删掉"))
+    }
+
+    /// PATH 记录带的不止一个条目：文案要涵盖它在标记块里的整条声明，不能只说「这一行」。
+    @Test func pathRecordsCoverTheirWholeDeclaration() {
+        let path = RemovalImpact(key: "PATH", saved: record("PATH", shell: true, gui: false))
+        let message = path.dialogMessage(zprofileLabel: "~/.zprofile")
+        #expect(message.contains("PATH 记录"))
+        #expect(message.contains("整串目录"))
+        #expect(message.contains("好几行"))
+        #expect(!message.contains("这一行"))
+
+        let plain = RemovalImpact(key: "FOO", saved: record("FOO", shell: true, gui: false))
+        #expect(!plain.dialogMessage(zprofileLabel: "~/.zprofile").contains("整串目录"))
+    }
+}
+
 // MARK: - 错误文案
 
 struct EngineErrorMessagesTests {

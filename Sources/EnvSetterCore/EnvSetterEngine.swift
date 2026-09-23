@@ -110,6 +110,8 @@ public final class EnvSetterEngine: Sendable {
         try validate(entries: entries)
 
         var store = try loadStore()
+        // 上次应用时工具拥有哪些 key：本次被移除的记录也在其中，GUI 层据此把它的 key 从 gui 域里清掉。
+        let previouslyManagedKeys = Set(store.entries.compactMap(\.key))
         let content = try readZprofile()
         let location = try MarkerBlock.locate(in: content)
 
@@ -156,7 +158,10 @@ public final class EnvSetterEngine: Sendable {
         try StorePersistence.save(store, to: paths.storeURL)
 
         // shell 层已落盘、状态已保存，之后才碰 launchd：GUI 层出问题也回不去影响上面。
-        return ApplyResult(shellContent: newContent, gui: gui?.apply(entries: entries))
+        return ApplyResult(
+            shellContent: newContent,
+            gui: gui?.apply(entries: entries, previouslyManagedKeys: previouslyManagedKeys)
+        )
     }
 
     // MARK: - 秘密值标记
