@@ -171,6 +171,50 @@ struct WarningLabel: View {
     }
 }
 
+/// GUI 层引用警告的卡片：标题 + 完整解释（哪一段、会展开成什么、怎么修）。
+/// 与红色校验错误的区别就在颜色与位置：这是提醒，不挡「应用」。
+struct ReferenceWarningCard: View {
+    let warning: GuiReferenceWarning
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(warning.title).font(.callout.weight(.medium))
+                ForEach(Array(warning.lines.enumerated()), id: \.offset) { _, line in
+                    // 值预览单独占一行、等宽：整条值可能很长，混在解释里读不出来。
+                    Text(line.text)
+                        .font(line.kind == .preview ? .system(.caption, design: .monospaced) : .caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.35)))
+    }
+}
+
+/// 一条记录的全部 GUI 层引用警告；没有警告就不占位置。
+struct ReferenceWarnings: View {
+    @ObservedObject var model: AppModel
+    let key: String
+
+    private var warnings: [GuiReferenceWarning] { model.referenceWarnings(for: key) }
+
+    var body: some View {
+        if !warnings.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(warnings) { ReferenceWarningCard(warning: $0) }
+            }
+        }
+    }
+}
+
 // MARK: - 详情区共用的段落
 
 /// 作用层双开关。

@@ -14,6 +14,7 @@ struct PathDetailView: View {
             VStack(alignment: .leading, spacing: 14) {
                 BannerBar(model: model)
                 header
+                ReferenceWarnings(model: model, key: record.key)
                 layerToggles
                 hint
                 editor

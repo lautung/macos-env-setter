@@ -179,6 +179,27 @@ struct SetenvScriptTests {
         )
     }
 
+    /// 引用警告说的「这一段会展开成空」必须对得上真实 /bin/sh：
+    /// 被引用的记录没进脚本（没开 GUI 开关）、或排在后面时，`ValueReferences.rendering` 给出的预览
+    /// 就是脚本里实际算出来的值。
+    @Test func guiReferencePreviewMatchesWhatTheScriptComputes() throws {
+        let (home, _) = try TestSupport.makeSandbox()
+        let entries: [ManagedEntry] = [
+            record("TOOLS", "/opt/tools", gui: false), // 没开 GUI 开关：不进脚本
+            record("AFTER", "$LATE/bin"), // 引用的变量排在后面：赋值时还没有值
+            record("LATE", "/opt/late"),
+            record("JAVA_HOME", "$TOOLS/jdk"), // 引用的变量在脚本里没有赋值
+        ]
+        let values = try printedValues(script: SetenvScript.generate(entries: entries), home: home)
+
+        let emptied = try #require(
+            ValueReferences.rendering("$TOOLS/jdk", quoteStyle: .double, emptying: "TOOLS")
+        )
+        #expect(values["JAVA_HOME"] == emptied)
+        #expect(emptied == "/jdk")
+        #expect(values["AFTER"] == "/bin")
+    }
+
     @Test func pathAnchorResolvesToTheShellInheritedPath() throws {
         let (home, _) = try TestSupport.makeSandbox()
         // 声明顺序决定 `$引用` 能否展开：TOOLS 必须排在引用它的 PATH 之前（两层同理）。

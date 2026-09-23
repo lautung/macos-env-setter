@@ -161,6 +161,8 @@ public struct RecordRow: Identifiable, Equatable, Sendable {
     public var preview: String
     /// 校验问题；非 nil 时行内显示红色提示。
     public var issue: String?
+    /// GUI 层引用警告；非空时行内显示橙色提示（非阻塞，不挡「应用」）。
+    public var warnings: [GuiReferenceWarning]
     public var isPath: Bool
 
     public var id: String { record.key }

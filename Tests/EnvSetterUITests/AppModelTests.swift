@@ -355,6 +355,107 @@ struct AppModelTests {
         #expect(harness.model.selection == "B")
     }
 
+    // MARK: - GUI 层引用警告（非阻塞）
+
+    /// 规格里的例子：GUI 层的 PATH 拿不到 `$JAVA_HOME/bin`。打开被引用记录的 GUI 开关，警告立刻消失——
+    /// 它算在草稿上，不需要重新载入。
+    @Test func guiReferenceWarningClearsWhenTheReferencedSwitchTurnsOn() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("JAVA_HOME", "/opt/jdk", gui: false)
+        await harness.addApplied("PATH", "$JAVA_HOME/bin:$PATH", gui: true)
+
+        let row = try #require(harness.model.rows.first { $0.record?.record.key == "PATH" }?.record)
+        #expect(row.warnings.map(\.referencedKey) == ["JAVA_HOME"])
+        #expect(harness.model.referenceWarnings(for: "PATH").first?.cause == .layerOff)
+
+        harness.model.setLayer(.gui, enabled: true, for: "JAVA_HOME")
+
+        #expect(harness.model.referenceWarnings(for: "PATH").isEmpty)
+        let cleared = try #require(harness.model.rows.first { $0.record?.record.key == "PATH" }?.record)
+        #expect(cleared.warnings.isEmpty)
+    }
+
+    /// 警告不挡应用：它走的是与校验错误分开的通道，`canApply` 不受影响。
+    @Test func guiReferenceWarningDoesNotBlockApply() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "JAVA_HOME", rawValue: "/opt/jdk", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.addRecord(key: "FOO", rawValue: "$JAVA_HOME/bin", shellEnabled: true, guiEnabled: true, secret: false)
+
+        #expect(harness.model.referenceWarnings(for: "FOO").count == 1)
+        #expect(harness.model.validationIssues.isEmpty) // 警告不进校验通道
+        #expect(harness.model.canApply)
+
+        await harness.model.apply()
+
+        #expect(harness.model.pendingCount == 0)
+        #expect(try harness.profileContent.contains(#"export FOO="$JAVA_HOME/bin""#))
+        // 脚本照常写出这一段（GUI 层里它会展开成空——这正是警告要说的）
+        #expect(try UITestSupport.read(harness.paths.guiScriptURL).contains(#"FOO="$JAVA_HOME/bin""#))
+    }
+
+    /// 秘密值的警告预览照样打码（与列表预览同一条规则），点过「显示」才给明文。
+    @Test func guiReferenceWarningPreviewsRespectMasking() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "TOOLS", rawValue: "/opt/tools", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.addRecord(
+            key: "TOKEN", rawValue: "$TOOLS/sk-live-9f3a81c7", shellEnabled: true, guiEnabled: true, secret: true
+        )
+
+        let masked = try #require(harness.model.referenceWarnings(for: "TOKEN").first?.rendering)
+        #expect(masked == SecretMasking.masked("/sk-live-9f3a81c7"))
+        #expect(!masked.contains("sk-live"))
+
+        harness.model.toggleReveal("TOKEN")
+        #expect(harness.model.referenceWarnings(for: "TOKEN").first?.rendering == "/sk-live-9f3a81c7")
+    }
+
+    /// 警告与校验错误是两条通道：有警告不影响应用，校验错误照旧挡住应用。
+    @Test func validationErrorsStillBlockApplyAlongsideWarnings() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("JAVA_HOME", "/opt/jdk", gui: false)
+        harness.model.addRecord(key: "FOO", rawValue: "$JAVA_HOME/bin", shellEnabled: true, guiEnabled: true, secret: false)
+
+        #expect(harness.model.referenceWarnings(for: "FOO").count == 1)
+        #expect(harness.model.canApply)
+
+        harness.model.addRecord(key: "FOO", rawValue: "dup", shellEnabled: true, guiEnabled: false, secret: false)
+        #expect(harness.model.validationIssues["FOO"] != nil)
+        #expect(!harness.model.canApply)
+    }
+
+    /// 只在 GUI 层算：同一个引用，只写 shell 层时不报警（shell 层块外还有用户手写内容）。
+    @Test func guiReferenceWarningsFollowTheGuiSwitch() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        harness.model.addRecord(key: "JAVA_HOME", rawValue: "/opt/jdk", shellEnabled: true, guiEnabled: false, secret: false)
+        harness.model.addRecord(key: "FOO", rawValue: "$JAVA_HOME/bin", shellEnabled: true, guiEnabled: false, secret: false)
+
+        #expect(harness.model.referenceWarnings.isEmpty)
+
+        harness.model.setLayer(.gui, enabled: true, for: "FOO")
+        #expect(harness.model.referenceWarnings(for: "FOO").count == 1)
+        // 被引用的那条自己没引用谁
+        #expect(harness.model.referenceWarnings(for: "JAVA_HOME").isEmpty)
+    }
+
+    /// 排到后面也是警告，理由与「没开开关」不同（脚本按声明顺序逐条赋值）。
+    @Test func guiReferenceWarningFollowsDeclarationOrder() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("JAVA_HOME", "/opt/jdk", gui: true)
+        await harness.addApplied("PATH", "$JAVA_HOME/bin", gui: true)
+        #expect(harness.model.referenceWarnings(for: "PATH").isEmpty)
+
+        harness.model.moveRecord("PATH", by: -1) // 引用者排到被引用者前面
+        let warning = try #require(harness.model.referenceWarnings(for: "PATH").first)
+        #expect(warning.cause == .declaredLater)
+        #expect(warning.detail.contains("上移"))
+    }
+
     // MARK: - 漂移
 
     @Test func driftIsReportedAndReloadedFromFile() async throws {

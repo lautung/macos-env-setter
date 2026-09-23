@@ -81,6 +81,11 @@ struct RecordRowView: View {
                             .foregroundStyle(.red)
                             .help(issue)
                     }
+                    if !row.warnings.isEmpty {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .help(row.warnings.map(\.summary).joined(separator: "\n"))
+                    }
                 }
                 Text(row.preview)
                     .font(.caption)

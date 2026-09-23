@@ -158,6 +158,17 @@ public final class AppModel: ObservableObject {
         RecordValidation.issues(in: entries)
     }
 
+    /// GUI 层引用警告（按记录 key 索引）。非阻塞：它不参与 `canApply`，
+    /// 只提醒「这一段在 GUI 层拿不到值」。修好（打开被引用记录的 GUI 开关、或把它上移）后立刻消失——
+    /// 它算在草稿上，不需要重新载入。
+    public var referenceWarnings: [String: [GuiReferenceWarning]] {
+        GuiReferenceWarnings.warnings(in: entries, revealedKey: revealedKey)
+    }
+
+    public func referenceWarnings(for key: String) -> [GuiReferenceWarning] {
+        referenceWarnings[key] ?? []
+    }
+
     public var pendingCount: Int { changes.count }
 
     public var structureChanged: Bool { changes.orderChanged }
@@ -180,6 +191,7 @@ public final class AppModel: ObservableObject {
     public var rows: [SidebarRow] {
         let changes = self.changes
         let issues = validationIssues
+        let warnings = referenceWarnings
         let query = search.trimmingCharacters(in: .whitespaces)
         var rows: [SidebarRow] = []
         var verbatimIndex = 0
@@ -196,6 +208,7 @@ public final class AppModel: ObservableObject {
                             layers: changes.layerStates(for: record),
                             preview: SecretMasking.preview(record, revealed: revealedKey == record.key),
                             issue: issues[record.key],
+                            warnings: warnings[record.key] ?? [],
                             isPath: record.key == VariableKeys.path
                         )
                     )

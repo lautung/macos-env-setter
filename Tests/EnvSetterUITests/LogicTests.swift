@@ -263,6 +263,183 @@ struct RemovalImpactTests {
     }
 }
 
+// MARK: - GUI 层引用警告
+
+struct GuiReferenceWarningsTests {
+    private func record(
+        _ key: String,
+        _ value: String,
+        shell: Bool = true,
+        gui: Bool = false,
+        style: QuoteStyle = .double
+    ) -> ManagedEntry {
+        .record(VariableRecord(key: key, rawValue: value, shellEnabled: shell, guiEnabled: gui, quoteStyle: style))
+    }
+
+    /// 规格里的例子：GUI 层的 PATH 拿不到 `$JAVA_HOME/bin`，那一段会展开成空。
+    @Test func referencingARecordWithoutTheGuiSwitchWarns() throws {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("JAVA_HOME", "/opt/jdk"),
+            record("PATH", "$JAVA_HOME/bin:$PATH", gui: true),
+        ])
+
+        let warning = try #require(warnings["PATH"]?.first)
+        #expect(warnings["PATH"]?.count == 1)
+        #expect(warning.referencedKey == "JAVA_HOME")
+        #expect(warning.cause == .layerOff)
+        // 哪一段：引用原文；会展开成什么：整条值里那一段被抽掉的样子
+        #expect(warning.occurrences == ["$JAVA_HOME"])
+        #expect(warning.rendering == "/bin:$PATH")
+        #expect(warning.summary.contains("没开 GUI 开关"))
+        // 「会展开成什么」单独占一行（值可能很长），视图按 kind 决定用等宽字展示
+        #expect(warning.lines.contains(GuiReferenceWarning.Line(kind: .preview, text: "/bin:$PATH")))
+        #expect(warning.detail.contains("整条值会变成："))
+        #expect(warning.detail.contains("修法"))
+        // 留着余地：gui 域里可能有别处设过的同名变量，不能把话说成绝对错误
+        #expect(warning.detail.contains("不一定"))
+    }
+
+    /// PATH 记录里的 `$PATH` 是锚点、不是对记录的引用——即便列表里真有一条没开 GUI 的 PATH 记录。
+    @Test func pathAnchorIsNotARecordReference() {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("PATH", "/a:$PATH", gui: false),
+            record("FOO", "$PATH:/opt/bin", gui: true),
+        ])
+        #expect(warnings.isEmpty)
+    }
+
+    @Test func referencingARecordDeclaredLaterWarns() throws {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("PATH", "$JAVA_HOME/bin", gui: true),
+            record("JAVA_HOME", "/opt/jdk", gui: true),
+        ])
+
+        let warning = try #require(warnings["PATH"]?.first)
+        #expect(warning.cause == .declaredLater)
+        #expect(warning.rendering == "/bin")
+        #expect(warning.summary.contains("排在后面"))
+        #expect(warning.detail.contains("引用只能看到"))
+        #expect(warning.detail.contains("上移"))
+    }
+
+    @Test func noWarningWhenTheReferencedRecordIsEnabledAndEarlier() {
+        #expect(
+            GuiReferenceWarnings.warnings(in: [
+                record("JAVA_HOME", "/opt/jdk", gui: true),
+                record("PATH", "$JAVA_HOME/bin", gui: true),
+            ]).isEmpty
+        )
+    }
+
+    /// 自引用是合法惯用法：`${RUBYOPT:+ $RUBYOPT}` 里外两层都指自己。
+    @Test func selfReferencesAreNotWarnings() {
+        #expect(
+            GuiReferenceWarnings.warnings(in: [
+                record("RUBYOPT", "-rlogger${RUBYOPT:+ $RUBYOPT}", gui: true),
+                record("FOO", "$FOO/suffix", gui: true),
+            ]).isEmpty
+        )
+    }
+
+    /// 不是列表里的记录（外部环境变量）：gui 域里可能是有的，不报警。
+    @Test func externalVariablesAreNotWarnings() {
+        #expect(GuiReferenceWarnings.warnings(in: [record("FOO", "$HOME/bin:$USER", gui: true)]).isEmpty)
+    }
+
+    /// 单引号样式是字面量，`$` 不展开。
+    @Test func singleQuotedValuesAreNotWarnings() {
+        #expect(
+            GuiReferenceWarnings.warnings(in: [
+                record("JAVA_HOME", "/opt/jdk"),
+                record("FOO", "$JAVA_HOME/bin", gui: true, style: .single),
+            ]).isEmpty
+        )
+    }
+
+    /// 只在 GUI 层算：没开 GUI 开关的记录不进脚本，谈不上「GUI 层引用不到」。
+    @Test func warningsAreGuiLayerOnly() {
+        #expect(
+            GuiReferenceWarnings.warnings(in: [
+                record("JAVA_HOME", "/opt/jdk"),
+                record("FOO", "$JAVA_HOME/bin", shell: true, gui: false),
+            ]).isEmpty
+        )
+    }
+
+    /// 一个被引用的变量只报一次，引用原文按出现顺序去重。
+    @Test func oneWarningPerReferencedVariable() throws {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("B", "1"),
+            record("A", "$B/x:${B}/y", gui: true),
+        ])
+
+        let warning = try #require(warnings["A"]?.first)
+        #expect(warnings["A"]?.count == 1)
+        #expect(warning.occurrences == ["$B", "${B}"])
+        #expect(warning.rendering == "/x:/y")
+    }
+
+    /// 自带兜底的写法（`${B:-默认值}`）：报「拿不到 B 的值」，但不给「会变成什么」的确定预览。
+    @Test func fallbackFormsAreReportedWithoutARendering() throws {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("B", "1"),
+            record("A", "${B:-/opt}/bin", gui: true),
+        ])
+
+        let warning = try #require(warnings["A"]?.first)
+        #expect(warning.referencedKey == "B")
+        #expect(warning.rendering == nil)
+        #expect(warning.detail.contains("取决于这个写法本身"))
+        #expect(!warning.detail.contains("整条值会变成"))
+    }
+
+    /// 整条值就是那一处引用：预览说「空」，而不是留一行空白。
+    @Test func wholeValueReferencePreviewsAsEmpty() throws {
+        let warnings = GuiReferenceWarnings.warnings(in: [
+            record("B", "1"),
+            record("A", "$B", gui: true),
+        ])
+
+        let warning = try #require(warnings["A"]?.first)
+        #expect(warning.rendering == "")
+        #expect(warning.detail.contains("整条值会变成空"))
+        #expect(!warning.lines.contains { $0.kind == .preview })
+    }
+
+    /// 秘密值：值预览跟列表预览同一套规则打码，警告卡片不该成为绕过打码的探针。
+    @Test func secretValuesAreMaskedInThePreview() throws {
+        let entries: [ManagedEntry] = [
+            record("B", "1"),
+            .record(
+                VariableRecord(
+                    key: "TOKEN", rawValue: "$B/sk-live-9f3a81c7",
+                    shellEnabled: true, guiEnabled: true, secret: true
+                )
+            ),
+        ]
+
+        let masked = try #require(GuiReferenceWarnings.warnings(in: entries)["TOKEN"]?.first?.rendering)
+        #expect(masked == SecretMasking.masked("/sk-live-9f3a81c7"))
+        #expect(!masked.contains("sk-live"))
+
+        // 点过「显示」才给明文
+        let revealed = try #require(
+            GuiReferenceWarnings.warnings(in: entries, revealedKey: "TOKEN")["TOKEN"]?.first?.rendering
+        )
+        #expect(revealed == "/sk-live-9f3a81c7")
+    }
+
+    /// 没开 GUI 开关的引用者：同一个引用，开关一开就报。
+    @Test func enablingTheGuiSwitchStartsReporting() throws {
+        let entries: [ManagedEntry] = [
+            record("JAVA_HOME", "/opt/jdk"),
+            record("FOO", "$JAVA_HOME/bin", gui: true),
+        ]
+        #expect(GuiReferenceWarnings.warnings(in: entries)["FOO"]?.count == 1)
+        #expect(GuiReferenceWarnings.warnings(in: [entries[0], record("FOO", "$JAVA_HOME/bin")]).isEmpty)
+    }
+}
+
 // MARK: - 诊断清单的呈现
 
 struct DiagnosisPresentationTests {

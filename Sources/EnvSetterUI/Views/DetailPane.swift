@@ -71,6 +71,7 @@ struct RecordDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 BannerBar(model: model)
                 header
+                ReferenceWarnings(model: model, key: record.key)
                 Form {
                     keyRow
                     valueRow
