@@ -33,7 +33,8 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 echo
 echo "已打包：$(pwd)/${ZIP}（版本 ${VERSION}，build ${BUILD}）"
 if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
-  echo "对应 tag：v${VERSION}（$(git rev-parse --short "v${VERSION}")）"
+  # 附注 tag 的 `rev-parse v1.0.0` 给的是 tag 对象，`^{commit}` 才是它指向的提交。
+  echo "对应 tag：v${VERSION}（提交 $(git rev-parse --short "v${VERSION}^{commit}")）"
 else
   echo "⚠️  还没有 v${VERSION} 这个 tag：发布前打上，用户才知道这个包对应哪个提交。"
 fi
