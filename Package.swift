@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "EnvSetterUI", targets: ["EnvSetterUI"]),
         .executable(name: "envsetter", targets: ["envsetter"]),
         .executable(name: "EnvSetterApp", targets: ["EnvSetterApp"]),
+        .executable(name: "ScreenshotTool", targets: ["ScreenshotTool"]),
     ],
     targets: [
         .target(name: "EnvSetterCore"),
@@ -24,6 +25,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "EnvSetterApp",
+            dependencies: ["EnvSetterCore", "EnvSetterUI"]
+        ),
+        // 只给 Scripts/make-screenshots.sh 用：离屏渲染真实视图出 README 截图。
+        .executableTarget(
+            name: "ScreenshotTool",
             dependencies: ["EnvSetterCore", "EnvSetterUI"]
         ),
         .testTarget(

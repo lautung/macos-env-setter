@@ -39,7 +39,7 @@ if [ ! -s "$ICNS" ]; then
 fi
 DECLARED_ICON="$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
 if [ "$DECLARED_ICON" != "EnvSetter" ]; then
-  echo "Info.plist 声明的图标是「$DECLARED_ICON」，与包里的 EnvSetter.icns 对不上" >&2
+  echo "Info.plist 声明的图标是「${DECLARED_ICON}」，与包里的 EnvSetter.icns 对不上" >&2
   exit 1
 fi
 

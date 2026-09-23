@@ -9,6 +9,14 @@ macOS 上这两层互不相通——在终端里 `export` 的变量，Dock 启�
 
 PATH 有专用排序编辑器（拖拽 + ↑↓、`$PATH` 锚点、重复条目警告）；编辑只改内存，点「应用」才一次性落盘（先自动备份）；「秘密值」在列表与预览里打码。
 
+## 界面
+
+下面两张是渲染出来的（用合成数据，不是截某台机器的屏幕——重生成命令见「从源码构建」）：
+
+![主窗口：左边是变量列表，右边是选中那条的详情；列表里每条带 shell / GUI 作用层标记](docs/images/main-window.png)
+
+![PATH 排序编辑器：拖拽或 ↑↓ 排序，虚线那条是 `$PATH` 锚点（排在锚点之前即前插）](docs/images/path-editor.png)
+
 ## 安装
 
 1. 到 [Releases](https://github.com/lautung/macos-env-setter/releases) 下载 `EnvSetter-1.0.1.zip`。
@@ -84,6 +92,7 @@ macOS 13 或更新。**实际只在 macOS 27 上验证过**——更早的系统
 ./Scripts/install-app.sh            # 构建后装到 ~/Applications/EnvSetter.app（日常从 Dock / Spotlight 打开）
 ./Scripts/install-app.sh --no-open  # 装完不打开
 ./Scripts/package-app.sh            # 打发布包 → dist/EnvSetter-<版本>.zip
+./Scripts/make-screenshots.sh       # 重新生成上面那两张 README 截图（--dark 出深色版）
 ```
 
 `.build/` 是被 gitignore 的构建目录，一次清理或重建就会让 Dock 上那份「消失」——所以日常用的那份装在 `~/Applications/EnvSetter.app`：它不依赖 `.build/`，重复运行 `install-app.sh` 就是覆盖安装（整包重建，不打断正在运行的实例，退出并重新打开应用后才会用上新版本）。`.build/EnvSetter.app` 照旧留着给验收用，安装不改变它。

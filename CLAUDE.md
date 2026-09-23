@@ -9,6 +9,7 @@ macOS 环境变量配置工具（SwiftUI 原生窗口应用）：在一个全局
 | `EnvSetterCore` | 引擎：数据模型、标记块读写、漂移、备份、收编、GUI 层（LaunchAgent + `setenv.sh`） |
 | `EnvSetterUI` | 界面状态（`AppModel`）与 SwiftUI 视图；纯逻辑（差异判定、校验、PATH 编辑、打码）不依赖 SwiftUI，可直接测 |
 | `EnvSetterApp` | SwiftUI 窗口应用，正式入口 |
+| `ScreenshotTool` | 只给 `Scripts/make-screenshots.sh` 用：离屏渲染真实视图出 README 截图（合成数据，不碰真实配置） |
 | `envsetter` | CLI：供验收与诊断（`status` / `adopt` / `restore` / `gui`） |
 
 ## 构建与运行
@@ -17,6 +18,7 @@ macOS 环境变量配置工具（SwiftUI 原生窗口应用）：在一个全局
 - 安装：`./Scripts/install-app.sh`（构建后装到 `~/Applications/EnvSetter.app`；覆盖安装，不打断正在运行的实例）
 - 发布包：`./Scripts/package-app.sh`（release 构建 → `dist/EnvSetter-<版本>.zip`；版本号取自 `Scripts/Info.plist`，本地构建、不签名）
 - 图标：`Scripts/make-icon.swift` 画出 `.icns`，构建时由 `build-app.sh` 生成进包并自检（生成失败即构建失败）。仓库不存图片二进制，见 `docs/adr/0002`
+- README 截图：`./Scripts/make-screenshots.sh`（`--dark` 出深色版）→ `docs/images/`。合成数据离屏渲染，不碰真实 `~/.zprofile`、不需要屏幕录制权限
 - CLI：`swift run envsetter status`
 - 测试：`swift test`
 - 真机 launchd 验收（默认不跑，会临时注册一个独立 label 的 agent 并全部清理）：
