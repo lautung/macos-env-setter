@@ -136,9 +136,19 @@ func describeGui(_ report: GuiApplyReport?) {
     case .skipped:
         print("  没有启用 GUI 层的变量，未安装 LaunchAgent。")
         return
+    case .uninstalled:
+        print("  没有启用 GUI 层的变量：脚本、LaunchAgent 与注册都不再存在。")
     case .applied: print("  ✅ 已同步。")
     case .partial: print("  ⚠️  部分完成（shell 层已写入，GUI 层见下）。")
     case .failed: print("  ❌ 未生效（shell 层已写入，不受影响）。")
+    }
+    // 没有 GUI 层变量时走的是卸载路径（`keys` 为空）：下面几行说的都是「装了没有」，卸载下没有意义。
+    guard !report.keys.isEmpty else {
+        if let warning = report.warning { print("  ⚠️  \(warning)") }
+        if !report.removedKeys.isEmpty {
+            print("  已清除残留：\(report.removedKeys.joined(separator: "、"))")
+        }
+        return
     }
     let scriptNote = report.scriptWritten ? "已写入" : "未写入"
     print("  脚本：\(report.scriptURL.path)（\(scriptNote)，\(report.keys.count) 个变量）")

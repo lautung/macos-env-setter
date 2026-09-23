@@ -233,6 +233,41 @@ struct EngineTests {
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"], since: callsBefore))
     }
 
+    /// 关掉最后一条 GUI 层变量并应用：GUI 层整体撤掉，shell 层逐字节不动。
+    @Test func uninstallingTheGuiLayerLeavesTheShellLayerUntouched() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let label = "com.example.envsetter-test"
+        let engine = EnvSetterEngine(
+            paths: paths,
+            gui: GuiLayer(
+                paths: paths,
+                label: label,
+                runner: runner,
+                environment: ["HOME": home.path, "PATH": LaunchAgent.defaultPath],
+                uid: 501
+            )
+        )
+        // 装上之后注册就没了（bootout 生效）——撤回时不必再取消一次
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
+            exitCode: 113, stdout: "", stderr: "Could not find service"
+        )
+
+        let on: [ManagedEntry] = [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))]
+        let first = try engine.apply(entries: on)
+        #expect(first.gui?.outcome == .applied, "\(first.gui?.warning ?? "")")
+        #expect(FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
+
+        let off: [ManagedEntry] = [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: false))]
+        let second = try engine.apply(entries: off)
+
+        #expect(second.gui?.outcome == .uninstalled)
+        #expect(second.shellContent == first.shellContent)
+        #expect(try TestSupport.read(paths.zprofileURL) == first.shellContent)
+        #expect(!FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
+        #expect(!FileManager.default.fileExists(atPath: LaunchAgent.plistURL(label: label, paths: paths).path))
+    }
+
     @Test func applyWithoutGuiLayerReportsNoGuiResult() throws {
         let (_, paths) = try TestSupport.makeSandbox()
         let engine = EnvSetterEngine(paths: paths)

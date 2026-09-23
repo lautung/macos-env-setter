@@ -277,6 +277,28 @@ struct AppModelTests {
         #expect(harness.runner.calls.contains { $0.arguments == ["unsetenv", "GUI_ONLY"] })
     }
 
+    /// 关掉最后一条 GUI 层变量并应用：横幅说清 GUI 层被整体撤掉，系统里不再留东西。
+    @Test func turningOffTheLastGuiVariableSaysTheGuiLayerWasRemoved() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("JAVA_HOME", "/opt/jdk", gui: true)
+        // 撤回时 launchctl 里已经没有注册（bootout 生效）
+        harness.runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(harness.model.guiLabel)"]] =
+            ProcessOutcome(exitCode: 113, stdout: "", stderr: "Could not find service")
+        harness.model.banner = nil
+
+        harness.model.setLayer(.gui, enabled: false, for: "JAVA_HOME")
+        await harness.model.apply()
+
+        let banner = try #require(harness.model.banner)
+        #expect(banner.kind == .info)
+        #expect(banner.text.contains("撤掉"))
+        #expect(banner.text.contains("JAVA_HOME"))
+        // 「只影响之后新启动的 App」这句每次应用后都要出现
+        #expect(banner.text.contains("只影响之后新启动的 App"))
+        #expect(!FileManager.default.fileExists(atPath: harness.paths.guiScriptURL.path))
+    }
+
     /// 两层都启用：两侧说法同时给出。
     @Test func removingARecordEnabledInBothLayersSaysBoth() async throws {
         let harness = try Harness()

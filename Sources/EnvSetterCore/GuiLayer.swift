@@ -20,6 +20,8 @@ public enum GuiApplyOutcome: String, Equatable, Sendable {
     case skipped
     /// 脚本、agent、即时注入、回读自检全部成功。
     case applied
+    /// 当前没有启用 GUI 层的变量：脚本、plist 与注册都已撤掉（没有 GUI 层变量就没有残留）。
+    case uninstalled
     /// 有没做成的部分（见 `warning`），脚本与 agent 可能已部分就位。
     case partial
     /// 脚本或 plist 没写成，GUI 层没有生效。
@@ -102,6 +104,7 @@ public struct GuiDiagnosis: Equatable, Sendable {
 /// 边界：本工具只拥有 `~/Library/LaunchAgents/<label>.plist` 与 `~/Library/Application Support/EnvSetter/setenv.sh`；
 /// 从不清除「自己没拥有过」的变量（既不在当前记录里、也不在上次应用的记录里），
 /// 避免踩到别的工具往 gui 域注入的同名变量。
+/// 这两样东西也只在有 GUI 层变量时存在：关掉最后一条并应用即整体撤掉（没有 GUI 层变量 ⇒ 没有脚本、没有 plist、没有注册）。
 public final class GuiLayer: Sendable {
     public let paths: EnginePaths
     public let label: String
@@ -153,6 +156,9 @@ public final class GuiLayer: Sendable {
     /// 它让「这次被移除的记录」也算本工具拥有过——否则移除一条 GUI 记录后，
     /// gui 域里会一直留着它的值，而界面上已经说了应用时会清掉。
     /// 不传（= 空）时只清仍在记录里的 key：不知道自己的历史时，这是安全的子集。
+    ///
+    /// 没有启用 GUI 层的变量时走卸载（见 `uninstall`），而不是「什么都不装」——
+    /// 不变式是**没有 GUI 层变量 ⇒ 没有脚本、没有 plist、没有注册**。
     public func apply(
         entries: [ManagedEntry],
         previouslyManagedKeys: Set<String> = []
@@ -177,8 +183,8 @@ public final class GuiLayer: Sendable {
             mismatches: [],
             warning: nil
         )
-        // 没有 GUI 层变量、此前也没同步过：不必为此装一个后台项。
-        guard !enabled.isEmpty || !previous.isEmpty else { return report }
+        // 没有 GUI 层变量：不装 agent，并把上次装下的东西撤干净。
+        guard !enabled.isEmpty else { return uninstall(report) }
 
         var problems: [String] = []
 
@@ -234,12 +240,7 @@ public final class GuiLayer: Sendable {
         } else {
             problems.append("把变量注入当前会话失败：\(injected.message)")
         }
-        for key in removals {
-            let outcome = runLaunchctl(["unsetenv", key])
-            if !outcome.succeeded {
-                problems.append("清除 GUI 域残留失败（launchctl unsetenv \(key)）：\(outcome.message)")
-            }
-        }
+        problems += clearInjectedValues(removals)
 
         // 5. 回读自检：gui 域里的值是否真的等于脚本算出的值
         if report.liveSynced, let expected {
@@ -258,23 +259,100 @@ public final class GuiLayer: Sendable {
         return report
     }
 
+    /// 卸载：没有启用 GUI 层的变量时，把上次装下的脚本、plist 与注册一并撤掉。
+    ///
+    /// 本来就没装过（纯 shell 层用户、或刚撤干净）时只查一次注册，什么都不动，`skipped` 原样返回。
+    /// 已关闭变量的残留（`removedKeys`）照旧只清本工具写过的 key：launchd 没有标记块那样的隔离区。
+    private func uninstall(_ report: GuiApplyReport) -> GuiApplyReport {
+        var report = report
+        let scriptExists = FileManager.default.fileExists(atPath: paths.guiScriptURL.path)
+        let plistExists = FileManager.default.fileExists(atPath: plistURL.path)
+        let wasRegistered = isRegistered()
+        // 注册也要算：文件被手工删过而 agent 还挂着时，只有注册能说明「这里还有本工具的东西」。
+        guard scriptExists || plistExists || wasRegistered else { return report }
+
+        var problems: [String] = []
+
+        // 1. 注册（先做：plist 一删，注册就成了没有着落的孤立项，要到重新登录才随域消失）
+        let unregister = bootout()
+        report.agentRegistered = isRegistered()
+        if report.agentRegistered {
+            problems.append(
+                "LaunchAgent 取消注册失败（launchctl bootout \(domain)/\(label)）：\(unregister.message)。"
+                + "注册仍在——重新登录后消失。"
+            )
+        }
+
+        // 2. LaunchAgent plist（登录项本身）
+        if plistExists {
+            do {
+                try FileManager.default.removeItem(at: plistURL)
+            } catch {
+                problems.append("LaunchAgent 文件删除失败（\(plistURL.path)）：\(error.localizedDescription)")
+            }
+        }
+
+        // 3. gui 域里的值：只清本工具写过的 key
+        let valueProblems = clearInjectedValues(report.removedKeys)
+        problems += valueProblems
+
+        // 4. 脚本：它记着本工具注入过哪些 key，是清残留的唯一依据。
+        //    值没清干净时留着它——下次应用能据此重试，诊断也能据此报出残留，而不是无从查起。
+        if scriptExists {
+            if valueProblems.isEmpty {
+                do {
+                    try FileManager.default.removeItem(at: paths.guiScriptURL)
+                } catch {
+                    problems.append("GUI 层脚本删除失败（\(paths.guiScriptURL.path)）：\(error.localizedDescription)")
+                }
+            } else {
+                problems.append("GUI 层脚本保留（\(paths.guiScriptURL.path)）：它记着要清的变量，下次应用会重试")
+            }
+        }
+
+        report.outcome = problems.isEmpty ? .uninstalled : .partial
+        report.warning = problems.isEmpty ? nil : problems.joined(separator: "\n")
+        return report
+    }
+
+    /// 把上次注入的变量从 gui 域里清掉；返回的每一条都是没清成的说明（空 = 全清干净了）。
+    private func clearInjectedValues(_ keys: [String]) -> [String] {
+        keys.compactMap { key in
+            let outcome = runLaunchctl(["unsetenv", key])
+            return outcome.succeeded ? nil : "清除 GUI 域残留失败（launchctl unsetenv \(key)）：\(outcome.message)"
+        }
+    }
+
     // MARK: - 诊断
 
     /// 只读体检：脚本、LaunchAgent、注册状态、后台项开关、注入值、已关闭变量的残留逐项检查。
     ///
     /// 六行恒定：每行的标题是名词短语、不随状态变化（见 `GuiCheckTitle`），
     /// 结论只写在详情里——空态下才读不出「标题说已注册、详情说尚未注册」这类矛盾句。
+    ///
+    /// 判定基准是**当前配置**（本地状态里的作用层开关），不是磁盘上碰巧有什么：
+    /// 没有启用 GUI 层的变量时，脚本 / plist / 注册反过来成了「残留」检查——
+    /// 本工具的东西不该还在系统里，应用会撤掉（不变式见 `apply` 的卸载路径），
+    /// 后台项开关也不再影响什么（空态下不该为此报警）。
     public func diagnose(entries: [ManagedEntry]) -> GuiDiagnosis {
         var checks: [GuiCheck] = []
         let enabled = SetenvScript.enabledKeys(entries: entries)
-        let previous = SetenvScript.appliedKeys(in: readString(paths.guiScriptURL) ?? "")
-        // 有 GUI 层变量、或脚本里还留着上次同步的变量时才需要一个 agent；
-        // 都没有（纯 shell 层用户）时，「没装 agent」是正常状态，不该报警。
-        let needsAgent = !enabled.isEmpty || !previous.isEmpty
+        // 当前配置要不要 GUI 层：不要的时候，「没装 agent」是正常状态，不该报警。
+        let expectsGuiLayer = !enabled.isEmpty
+        let scriptOnDisk = readString(paths.guiScriptURL)
+        let plistOnDisk = try? Data(contentsOf: plistURL)
 
         // 1. 脚本
-        if let onDisk = readString(paths.guiScriptURL) {
-            if onDisk == scriptContent(entries: entries) {
+        if let onDisk = scriptOnDisk {
+            if !expectsGuiLayer {
+                checks.append(
+                    GuiCheck(
+                        name: GuiCheckTitle.script,
+                        detail: "当前没有启用 GUI 层的变量：应用后会删除",
+                        status: .warning
+                    )
+                )
+            } else if onDisk == scriptContent(entries: entries) {
                 checks.append(
                     GuiCheck(name: GuiCheckTitle.script, detail: "\(enabled.count) 个变量，与当前配置一致", status: .ok)
                 )
@@ -291,51 +369,71 @@ public final class GuiLayer: Sendable {
             checks.append(
                 GuiCheck(
                     name: GuiCheckTitle.script,
-                    detail: enabled.isEmpty ? "尚未创建（当前没有启用 GUI 层的变量）" : "尚未创建：应用后会生成",
-                    status: enabled.isEmpty ? .ok : .warning
+                    detail: expectsGuiLayer ? "尚未创建：应用后会生成" : "尚未创建（当前没有启用 GUI 层的变量）",
+                    status: expectsGuiLayer ? .warning : .ok
                 )
             )
         }
 
         // 2. LaunchAgent 文件
-        if let data = try? Data(contentsOf: plistURL) {
-            let matches = LaunchAgent.plistMatches(
-                existing: data, label: label, scriptPath: paths.guiScriptURL.path
-            )
-            checks.append(
-                GuiCheck(
-                    name: GuiCheckTitle.agentFile,
-                    detail: matches
-                        ? "\(plistURL.lastPathComponent) 内容正确"
-                        : "\(plistURL.lastPathComponent) 内容与目标不符（应用时会重写并重新注册）",
-                    status: matches ? .ok : .warning
+        if let data = plistOnDisk {
+            if !expectsGuiLayer {
+                checks.append(
+                    GuiCheck(
+                        name: GuiCheckTitle.agentFile,
+                        detail: "\(plistURL.lastPathComponent) 仍在，但当前没有启用 GUI 层的变量（应用后会删除）",
+                        status: .warning
+                    )
                 )
-            )
+            } else {
+                let matches = LaunchAgent.plistMatches(
+                    existing: data, label: label, scriptPath: paths.guiScriptURL.path
+                )
+                checks.append(
+                    GuiCheck(
+                        name: GuiCheckTitle.agentFile,
+                        detail: matches
+                            ? "\(plistURL.lastPathComponent) 内容正确"
+                            : "\(plistURL.lastPathComponent) 内容与目标不符（应用时会重写并重新注册）",
+                        status: matches ? .ok : .warning
+                    )
+                )
+            }
         } else {
             checks.append(
                 GuiCheck(
                     name: GuiCheckTitle.agentFile,
-                    detail: needsAgent
+                    detail: expectsGuiLayer
                         ? "\(plistURL.path) 不存在，登录时不会重放变量"
                         : "尚未安装（当前没有启用 GUI 层的变量）",
-                    status: needsAgent ? .failed : .ok
+                    status: expectsGuiLayer ? .failed : .ok
                 )
             )
         }
 
         // 3. 注册
         let registered = isRegistered()
-        checks.append(
-            GuiCheck(
-                name: GuiCheckTitle.agentRegistration,
-                detail: registered
-                    ? "\(label) 已在 \(domain)"
-                    : (needsAgent
-                        ? "\(label) 不在 \(domain)：本次登录不会执行（重新登录或应用后注册）"
-                        : "尚未注册（当前没有启用 GUI 层的变量）"),
-                status: registered || !needsAgent ? .ok : .warning
+        if registered, !expectsGuiLayer {
+            checks.append(
+                GuiCheck(
+                    name: GuiCheckTitle.agentRegistration,
+                    detail: "\(label) 仍注册在 \(domain)，但当前没有启用 GUI 层的变量（应用后会取消注册）",
+                    status: .warning
+                )
             )
-        )
+        } else {
+            checks.append(
+                GuiCheck(
+                    name: GuiCheckTitle.agentRegistration,
+                    detail: registered
+                        ? "\(label) 已在 \(domain)"
+                        : (expectsGuiLayer
+                            ? "\(label) 不在 \(domain)：本次登录不会执行（重新登录或应用后注册）"
+                            : "尚未注册（当前没有启用 GUI 层的变量）"),
+                    status: registered || !expectsGuiLayer ? .ok : .warning
+                )
+            )
+        }
 
         // 4. 后台项（BTM）：Ventura 起用户可在系统设置里关掉，关掉即登录不重放
         switch launchdDisabledState() {
@@ -343,8 +441,10 @@ public final class GuiLayer: Sendable {
             checks.append(
                 GuiCheck(
                     name: GuiCheckTitle.backgroundItem,
-                    detail: "该登录项在系统设置里被关闭：登录时不会重放变量（系统设置 → 通用 → 登录项与扩展 → 后台允许）",
-                    status: .failed
+                    detail: expectsGuiLayer
+                        ? "该登录项在系统设置里被关闭：登录时不会重放变量（系统设置 → 通用 → 登录项与扩展 → 后台允许）"
+                        : "系统设置里该登录项被关闭，但当前没有启用 GUI 层的变量：这一开关已无影响",
+                    status: expectsGuiLayer ? .failed : .ok
                 )
             )
         case .enabled:
@@ -354,7 +454,7 @@ public final class GuiLayer: Sendable {
                     // 只说这一行量到的东西：系统设置里的开关没被关掉。
                     // 「登录时会重放变量」是装没装、注册没注册的事，那是上面两行的结论——
                     // 在这里替它们下结论，agent 缺失时就会读出自相矛盾的清单。
-                    detail: needsAgent ? "未被系统设置禁用" : "未被系统设置禁用（当前没有启用 GUI 层的变量）",
+                    detail: expectsGuiLayer ? "未被系统设置禁用" : "未被系统设置禁用（当前没有启用 GUI 层的变量）",
                     status: .ok
                 )
             )
@@ -463,8 +563,10 @@ public final class GuiLayer: Sendable {
         runLaunchctl(["print", "\(domain)/\(label)"]).succeeded
     }
 
-    private func bootout() {
-        _ = runLaunchctl(["bootout", "\(domain)/\(label)"])
+    /// 取消注册。没注册时它会失败，这是正常结果——调用方按 `isRegistered()` 判断成败。
+    @discardableResult
+    private func bootout() -> ProcessOutcome {
+        runLaunchctl(["bootout", "\(domain)/\(label)"])
     }
 
     private func launchdDisabledState() -> DisabledState {

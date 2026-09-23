@@ -779,6 +779,18 @@ public final class AppModel: ObservableObject {
                 kind: .info,
                 text: "已应用：\(zprofileLabel) 标记块与本地状态已写入（应用前已自动备份）。当前没有启用 GUI 层的变量，未安装 LaunchAgent。\(effect)"
             )
+        case .uninstalled:
+            let cleared = gui.removedKeys.isEmpty
+                ? ""
+                : "，并从 gui 域清除了 \(gui.removedKeys.count) 个变量（\(gui.removedKeys.joined(separator: "、"))）"
+            return Banner(
+                kind: .info,
+                text: """
+                    已应用：\(zprofileLabel) 标记块与本地状态已写入（应用前已自动备份）。当前没有启用 GUI 层的变量：\
+                    GUI 层已整体撤掉——脚本、LaunchAgent 与登录项都不再存在\(cleared)。\
+                    只影响之后新启动的 App：已在运行的 App 仍持有旧值（退出重开才会丢掉）。
+                    """
+            )
         case .partial, .failed:
             return Banner(
                 kind: .warning,
