@@ -65,7 +65,8 @@ struct LayerChips: View {
 
 // MARK: - 横幅
 
-/// 应用/收编/漂移之后的一次性提示；信息类会自动消失，警告类留着等用户关掉。
+/// 应用/收编/漂移之后的一次性提示卡片；信息类会自动消失，警告类留着等用户关掉。
+/// 它由 `BannerBar` 放在详情内容顶上占一条位置（不是浮层），所以没有投影。
 struct BannerView: View {
     let banner: AppModel.Banner
     let dismiss: () -> Void
@@ -86,8 +87,36 @@ struct BannerView: View {
         .padding(.vertical, 9)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.gray.opacity(0.25)))
-        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
         .frame(maxWidth: 640)
+    }
+}
+
+/// 提示条：详情内容顶上占一条位置、把内容往下推（原来是窗口级浮层，会盖住标题——验收缺陷 ②）。
+/// 放在详情内容流里而不是浮在分栏上：分栏被推出窗口顶边时，macOS 26 会在详情栏滚动视图顶边
+/// 套一层淡出把标题糊掉；给两栏内容加占位又会把分栏撑高、每启动一次再长一点。
+struct BannerBar: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if let banner = model.banner {
+            BannerView(banner: banner) { model.banner = nil }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity)
+                .overlay(alignment: .bottom) { Divider() }
+                .task(id: banner.id) {
+                    // 信息类自己退场；警告类留着，等用户看明白了再关。
+                    // 别用 `try?`：视图被重建（例如换了选中的记录）时这个 task 会被取消，
+                    // 被吞掉的取消会让 sleep 立刻返回、提示条当场被清掉，等于从不显示。
+                    guard banner.kind == .info else { return }
+                    do {
+                        try await Task.sleep(nanoseconds: 12_000_000_000)
+                    } catch {
+                        return
+                    }
+                    if model.banner?.id == banner.id { model.banner = nil }
+                }
+        }
     }
 }
 

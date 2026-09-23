@@ -23,22 +23,28 @@ struct DetailPane: View {
 
     @ViewBuilder private var emptyState: some View {
         if model.entries.isEmpty {
-            EmptyPane(
-                icon: "list.bullet.rectangle",
-                title: "还没有变量",
-                message: """
-                    可以从「收编已有配置」开始，把 \(model.zprofileLabel) 里手写的 export 行接管进来；\
-                    也可以点右上角 + 新建一条。
-                    """,
-                actionTitle: "收编已有配置…",
-                action: { Task { await model.planAdoption() } }
-            )
+            VStack(spacing: 0) {
+                BannerBar(model: model)
+                EmptyPane(
+                    icon: "list.bullet.rectangle",
+                    title: "还没有变量",
+                    message: """
+                        可以从「收编已有配置」开始，把 \(model.zprofileLabel) 里手写的 export 行接管进来；\
+                        也可以点右上角 + 新建一条。
+                        """,
+                    actionTitle: "收编已有配置…",
+                    action: { Task { await model.planAdoption() } }
+                )
+            }
         } else {
-            EmptyPane(
-                icon: "hand.point.left",
-                title: "选择一个变量",
-                message: "左侧选择变量查看与编辑，或点右上角 + 新建一条。编辑只改内存，点「应用」才写入两层。"
-            )
+            VStack(spacing: 0) {
+                BannerBar(model: model)
+                EmptyPane(
+                    icon: "hand.point.left",
+                    title: "选择一个变量",
+                    message: "左侧选择变量查看与编辑，或点右上角 + 新建一条。编辑只改内存，点「应用」才写入两层。"
+                )
+            }
         }
     }
 }
@@ -63,6 +69,7 @@ struct RecordDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                BannerBar(model: model)
                 header
                 Form {
                     keyRow

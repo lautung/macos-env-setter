@@ -12,6 +12,7 @@ struct PathDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                BannerBar(model: model)
                 header
                 layerToggles
                 hint

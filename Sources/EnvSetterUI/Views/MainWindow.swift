@@ -18,7 +18,6 @@ public struct MainWindow: View {
         .navigationTitle("EnvSetter")
         .navigationSubtitle(model.zprofileLabel)
         .toolbar { toolbar }
-        .overlay(alignment: .top) { bannerOverlay }
         .sheet(item: $model.sheet) { sheet in sheetContent(sheet) }
         .alert(dialogTitle, isPresented: dialogBinding, presenting: model.dialog) { dialog in
             dialogButtons(dialog)
@@ -74,21 +73,6 @@ public struct MainWindow: View {
             text += "（本次会话上次应用：\(last)）"
         }
         return text
-    }
-
-    // MARK: - 横幅
-
-    @ViewBuilder private var bannerOverlay: some View {
-        if let banner = model.banner {
-            BannerView(banner: banner) { model.banner = nil }
-                .padding(.top, 10)
-                .task(id: banner.id) {
-                    // 信息类自己退场；警告类留着，等用户看明白了再关。
-                    guard banner.kind == .info else { return }
-                    try? await Task.sleep(nanoseconds: 12_000_000_000)
-                    if model.banner?.id == banner.id { model.banner = nil }
-                }
-        }
     }
 
     // MARK: - 面板
