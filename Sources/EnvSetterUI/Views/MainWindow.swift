@@ -37,11 +37,13 @@ public struct MainWindow: View {
                     Text(label).font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // macOS 的工具栏默认只画图标；待生效的条数（「应用 (N)」）得看得见，README 也这么写。
             Button {
                 model.sheet = .newRecord
             } label: {
                 Label("新建变量", systemImage: "plus")
             }
+            .labelStyle(.titleAndIcon)
             .disabled(model.isBusy)
             .help("新建一条变量（⌘N）")
 
@@ -50,6 +52,7 @@ public struct MainWindow: View {
             } label: {
                 Label("重新载入", systemImage: "arrow.triangle.2.circlepath")
             }
+            .labelStyle(.titleAndIcon)
             .disabled(model.isBusy)
             .help("以 \(model.zprofileLabel) 为准重新载入（⌘R）")
 
@@ -58,6 +61,7 @@ public struct MainWindow: View {
             } label: {
                 Label(model.pendingCount > 0 ? "应用 (\(model.pendingCount))" : "应用", systemImage: "checkmark.seal")
             }
+            .labelStyle(.titleAndIcon)
             .buttonStyle(.borderedProminent)
             .disabled(!model.canApply)
             .help(applyHelp)
