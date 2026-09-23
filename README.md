@@ -11,7 +11,7 @@ PATH 有专用排序编辑器（拖拽 + ↑↓、`$PATH` 锚点、重复条目�
 
 ## 安装
 
-1. 到 [Releases](https://github.com/lautung/macos-env-setter/releases) 下载 `EnvSetter-1.0.0.zip`。
+1. 到 [Releases](https://github.com/lautung/macos-env-setter/releases) 下载 `EnvSetter-1.0.1.zip`。
 2. 双击解开，把 `EnvSetter.app` 拖进「应用程序」。
 3. **右键（或 Control + 点击）→ 打开**，在弹出的框里再点「打开」。
 
@@ -22,6 +22,18 @@ PATH 有专用排序编辑器（拖拽 + ↑↓、`$PATH` 锚点、重复条目�
 ```bash
 xattr -d com.apple.quarantine /Applications/EnvSetter.app
 ```
+
+### 从旧版升级
+
+把新版的 `EnvSetter.app` 拖进「应用程序」覆盖旧的那份就行，列表与开关存在 `~/Library/Application Support/EnvSetter/store.json`，不会丢。
+
+覆盖之后如果 Finder 或 Dock 里还显示着旧图标（1.0.0 及更早的版本没有图标，那时是系统的占位图标），退出应用重开一次；仍然不变就重启 Dock：
+
+```bash
+killall Dock
+```
+
+系统按 bundle id 缓存图标，原地覆盖安装不会让它立刻失效——只是显示问题，不影响功能。
 
 ## 第一次使用
 
@@ -56,7 +68,7 @@ xattr -d com.apple.quarantine /Applications/EnvSetter.app
 
 ## 系统要求
 
-macOS 13 或更新。**实际只在 macOS 26 上验证过**——更早的系统没测过，遇到问题欢迎开 issue。
+macOS 13 或更新。**实际只在 macOS 27 上验证过**——更早的系统没测过，遇到问题欢迎开 issue。
 
 ## 已知问题
 
@@ -75,6 +87,8 @@ macOS 13 或更新。**实际只在 macOS 26 上验证过**——更早的系统
 ```
 
 `.build/` 是被 gitignore 的构建目录，一次清理或重建就会让 Dock 上那份「消失」——所以日常用的那份装在 `~/Applications/EnvSetter.app`：它不依赖 `.build/`，重复运行 `install-app.sh` 就是覆盖安装（整包重建，不打断正在运行的实例，退出并重新打开应用后才会用上新版本）。`.build/EnvSetter.app` 照旧留着给验收用，安装不改变它。
+
+应用图标是画出来的（`Scripts/make-icon.swift`，构建时由 `build-app.sh` 生成进包），仓库里不存图片资产——改图标就是改那个文件，见 `docs/adr/0002`。
 
 日用时的两条作用层边界：
 

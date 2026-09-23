@@ -23,9 +23,26 @@ APP=".build/EnvSetter.app"
 
 # 整包重建：避免上次构建留下的文件混在里面。
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/EnvSetterApp"
 cp Scripts/Info.plist "$APP/Contents/Info.plist"
+
+# 图标是画出来的、不是仓库里的二进制（见 docs/adr/0002）：每次构建重画一份放进包里。
+ICNS="$APP/Contents/Resources/EnvSetter.icns"
+swift Scripts/make-icon.swift "$ICNS"
+
+# 自检：图标在位且非空、Info.plist 声明的名字与它一致。少了图标是肉眼才看得出的缺陷，
+# 所以宁可构建失败，也不要悄悄交出一个没图标的包。
+if [ ! -s "$ICNS" ]; then
+  echo "图标没生成出来：$ICNS" >&2
+  exit 1
+fi
+DECLARED_ICON="$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
+if [ "$DECLARED_ICON" != "EnvSetter" ]; then
+  echo "Info.plist 声明的图标是「$DECLARED_ICON」，与包里的 EnvSetter.icns 对不上" >&2
+  exit 1
+fi
+
 # 让 Finder/Dock 立刻认出新包。
 touch "$APP"
 

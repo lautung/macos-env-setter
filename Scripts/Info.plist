@@ -10,12 +10,14 @@
 	<string>com.lautung.env-setter.app</string>
 	<key>CFBundleExecutable</key>
 	<string>EnvSetterApp</string>
+	<key>CFBundleIconFile</key>
+	<string>EnvSetter</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.0.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 lautung. MIT License.</string>
 	<key>LSMinimumSystemVersion</key>
