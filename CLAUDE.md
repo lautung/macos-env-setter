@@ -15,6 +15,7 @@ macOS 环境变量配置工具（SwiftUI 原生窗口应用）：在一个全局
 
 - 应用：`./Scripts/build-app.sh`（构建 `.build/EnvSetter.app` 并打开；`--no-open` 只构建，`--debug` 用 debug 配置）
 - 安装：`./Scripts/install-app.sh`（构建后装到 `~/Applications/EnvSetter.app`；覆盖安装，不打断正在运行的实例）
+- 发布包：`./Scripts/package-app.sh`（release 构建 → `dist/EnvSetter-<版本>.zip`；版本号取自 `Scripts/Info.plist`，本地构建、不签名）
 - CLI：`swift run envsetter status`
 - 测试：`swift test`
 - 真机 launchd 验收（默认不跑，会临时注册一个独立 label 的 agent 并全部清理）：
