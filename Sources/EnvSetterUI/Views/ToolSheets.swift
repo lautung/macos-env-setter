@@ -337,7 +337,7 @@ struct DiagnosticsSheet: View {
 
             HStack {
                 Button("重新体检") { Task { await model.openDiagnostics() } }
-                if loginItemIssue {
+                if backgroundItemIssue {
                     Button("打开系统设置的登录项面板") { model.openLoginItemsSettings() }
                 }
                 Spacer()
@@ -349,8 +349,9 @@ struct DiagnosticsSheet: View {
         .frame(width: 680, height: 500)
     }
 
-    private var loginItemIssue: Bool {
-        model.diagnosis?.checks.contains { $0.name.contains("后台项") && $0.status != .ok } ?? false
+    /// 后台项那一行不通过时才给出去系统设置的入口（判定见 `GuiDiagnosis.hasBackgroundItemProblem`）。
+    private var backgroundItemIssue: Bool {
+        model.diagnosis?.hasBackgroundItemProblem ?? false
     }
 
     private func symbol(for status: GuiCheckStatus) -> String {

@@ -263,6 +263,25 @@ struct RemovalImpactTests {
     }
 }
 
+// MARK: - 诊断清单的呈现
+
+struct DiagnosisPresentationTests {
+    private func diagnosis(_ checks: [(String, GuiCheckStatus)]) -> GuiDiagnosis {
+        GuiDiagnosis(checks: checks.map { GuiCheck(name: $0.0, detail: "", status: $0.1) })
+    }
+
+    /// 「打开系统设置的登录项面板」按钮只跟后台项那一行有关：它不通过才出现。
+    /// 判定按标题常量，不再对标题做子串匹配（标题是行身份，见 `GuiCheckTitle`）。
+    @Test func loginItemsShortcutFollowsTheBackgroundItemRow() {
+        #expect(diagnosis([(GuiCheckTitle.backgroundItem, .failed)]).hasBackgroundItemProblem)
+        #expect(diagnosis([(GuiCheckTitle.backgroundItem, .warning)]).hasBackgroundItemProblem)
+        #expect(!diagnosis([(GuiCheckTitle.backgroundItem, .ok)]).hasBackgroundItemProblem)
+        // 别的行出问题不算：这个按钮不去修脚本、plist 或注册的事
+        #expect(!diagnosis([(GuiCheckTitle.script, .failed), (GuiCheckTitle.agentFile, .failed)]).hasBackgroundItemProblem)
+        #expect(!diagnosis([(GuiCheckTitle.backgroundItem, .ok), (GuiCheckTitle.agentRegistration, .warning)]).hasBackgroundItemProblem)
+    }
+}
+
 // MARK: - 错误文案
 
 struct EngineErrorMessagesTests {

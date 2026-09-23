@@ -57,7 +57,7 @@ struct SidebarView: View {
                 } label: {
                     Label("诊断 LaunchAgent…", systemImage: "stethoscope")
                 }
-                .help("逐项检查 GUI 层：脚本 / LaunchAgent / 注册 / 后台项 / 注入值")
+                .help("逐项检查 GUI 层：脚本 / LaunchAgent 文件 / 注册 / 后台项 / 注入值 / 残留")
             }
         }
         .listStyle(.sidebar)

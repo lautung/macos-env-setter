@@ -89,7 +89,7 @@ public final class EnvSetterEngine: Sendable {
 
     // MARK: - GUI 层诊断
 
-    /// 只读体检：脚本 / LaunchAgent / 注册状态 / 后台项开关 / gui 域里的注入值逐项检查。
+    /// 只读体检：脚本 / LaunchAgent 文件 / 注册状态 / 后台项开关 / gui 域里的注入值 / 已关闭变量的残留逐项检查。
     /// 以本地状态里的作用层开关为准，不读也不改标记块——shell 层是否有漂移都不影响这份体检。
     /// 引擎未接入 GUI 层时返回 nil。
     public func guiDiagnosis() throws -> GuiDiagnosis? {

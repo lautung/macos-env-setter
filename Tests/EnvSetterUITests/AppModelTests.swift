@@ -694,8 +694,8 @@ struct AppModelTests {
         await harness.model.openDiagnostics()
         #expect(harness.model.sheet == .diagnostics)
         let diagnosis = try #require(harness.model.diagnosis)
-        #expect(diagnosis.checks.contains { $0.name == "GUI 层脚本" })
-        #expect(diagnosis.checks.contains { $0.name.contains("后台项") })
+        // 界面拿到的就是清单那六行、那个顺序（标题是行身份，`List` 以它作 `id`）
+        #expect(diagnosis.checks.map(\.name) == GuiCheckTitle.checklist)
     }
 
     @Test func diagnosticsWithoutGuiLayerWarns() async throws {

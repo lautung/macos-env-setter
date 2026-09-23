@@ -253,7 +253,7 @@ struct GuiLayerTests {
         let diagnosis = layer.diagnose(entries: entries)
 
         #expect(diagnosis.isHealthy, "\(diagnosis.checks.filter { $0.status != .ok })")
-        #expect(diagnosis.checks.map(\.name).contains("值已注入当前会话"))
+        #expect(diagnosis.checks.map(\.name).contains(GuiCheckTitle.injectedValues))
     }
 
     @Test func diagnoseSurfacesDisabledLoginItemAndMissingAgent() throws {
@@ -272,12 +272,12 @@ struct GuiLayerTests {
         let diagnosis = layer.diagnose(entries: entries)
 
         #expect(diagnosis.hasFailure)
-        let disabled = try #require(diagnosis.checks.first { $0.name == "后台项未被禁用" })
+        let disabled = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.backgroundItem })
         #expect(disabled.status == .failed)
         #expect(disabled.detail.contains("登录项与扩展"))
-        let agent = try #require(diagnosis.checks.first { $0.name == "LaunchAgent" })
+        let agent = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.agentFile })
         #expect(agent.status == .failed)
-        let registered = try #require(diagnosis.checks.first { $0.name == "agent 已注册" })
+        let registered = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.agentRegistration })
         #expect(registered.status == .warning)
     }
 
@@ -300,8 +300,106 @@ struct GuiLayerTests {
 
         let diagnosis = layer.diagnose(entries: entries)
 
-        let leftover = try #require(diagnosis.checks.first { $0.name == "无已关闭变量的残留" })
+        let leftover = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.disabledLeftovers })
         #expect(leftover.status == .warning)
         #expect(leftover.detail.contains("OLD"))
+    }
+
+    // MARK: - 清单标题的契约
+
+    /// 空态：没有任何 GUI 层变量，也没装过任何东西。
+    private func emptyStateDiagnosis() throws -> GuiDiagnosis {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
+            exitCode: 113, stdout: "", stderr: "Could not find service"
+        )
+        return makeLayer(home: home, paths: paths, runner: runner).diagnose(entries: [])
+    }
+
+    /// 健康态：脚本、plist、注册、后台项、注入值、残留逐项通过。
+    private func healthyStateDiagnosis() throws -> GuiDiagnosis {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let entries: [ManagedEntry] = [record("TOOLS", "/opt/tools"), record("JAVA_HOME", "/opt/tools/jdk")]
+        _ = stubHappyPath(runner, paths: paths, entries: entries)
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
+            exitCode: 0, stdout: "service", stderr: ""
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "print-disabled", "gui/501"]] = ProcessOutcome(
+            exitCode: 0, stdout: "\tdisabled services = {\n\t\t\"\(label)\" => enabled\n\t}\n", stderr: ""
+        )
+        let layer = makeLayer(home: home, paths: paths, runner: runner)
+        _ = layer.apply(entries: entries)
+        return layer.diagnose(entries: entries)
+    }
+
+    /// 故障态：脚本在、plist 不在、没注册、后台项被系统设置关掉、gui 域里还是旧值。
+    private func faultyStateDiagnosis() throws -> GuiDiagnosis {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let entries: [ManagedEntry] = [record("TOOLS", "/opt/tools"), record("JAVA_HOME", "/opt/tools/jdk")]
+        try TestSupport.write(SetenvScript.generate(entries: entries, label: label), to: paths.guiScriptURL)
+        runner.outcomes[[LaunchAgent.shellPath, paths.guiScriptURL.path, SetenvScript.printFlag]] = ProcessOutcome(
+            exitCode: 0, stdout: "TOOLS=/opt/tools\nJAVA_HOME=/opt/tools/jdk\n", stderr: ""
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "TOOLS"]] = ProcessOutcome(
+            exitCode: 0, stdout: "/opt/tools\n", stderr: ""
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "JAVA_HOME"]] = ProcessOutcome(
+            exitCode: 0, stdout: "/opt/old/jdk\n", stderr: ""
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
+            exitCode: 113, stdout: "", stderr: "Could not find service"
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "print-disabled", "gui/501"]] = ProcessOutcome(
+            exitCode: 0, stdout: "\tdisabled services = {\n\t\t\"\(label)\" => disabled\n\t}\n", stderr: ""
+        )
+        return makeLayer(home: home, paths: paths, runner: runner).diagnose(entries: entries)
+    }
+
+    /// 标题是清单的行身份（界面以 `name` 作 `id`）：空态、健康态、故障态下都是同一串标题。
+    /// 标题只说「在查什么」，不随状态变化——空态才不会读出「标题说已注册、详情说尚未注册」这种矛盾句。
+    @Test func diagnosisTitlesAreUniqueAndConstantAcrossStates() throws {
+        let empty = try emptyStateDiagnosis()
+        let healthy = try healthyStateDiagnosis()
+        let faulty = try faultyStateDiagnosis()
+
+        // 三种状态各自成立：空态没有要修的项，健康态全绿，故障态有失败项。
+        #expect(empty.isHealthy, "空态不该有需要修的项：\(empty.checks.filter { $0.status != .ok })")
+        #expect(healthy.isHealthy, "健康态应当全绿：\(healthy.checks.filter { $0.status != .ok })")
+        #expect(faulty.hasFailure, "故障态应当有失败项")
+
+        for (state, diagnosis) in [("空态", empty), ("健康态", healthy), ("故障态", faulty)] {
+            let titles = diagnosis.checks.map(\.name)
+            #expect(titles == GuiCheckTitle.checklist, "\(state)：固定六行、顺序固定（脚本 → plist → 注册 → 后台项 → 注入值 → 残留）")
+            #expect(Set(titles).count == titles.count, "\(state)：标题在同一份诊断里唯一")
+        }
+
+        // 后台项契约：含「后台项」三字的标题仍然存在（界面的登录项面板按钮按这个常量判定显示与否）。
+        #expect(GuiCheckTitle.backgroundItem.contains("后台项"))
+    }
+
+    /// 每一行的详情只说这一行量到的事：agent 缺失时，后台项那一行不能替上面两行宣称「登录时会重放变量」。
+    @Test func backgroundItemRowDoesNotSpeakForTheAgentRows() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let entries: [ManagedEntry] = [record("TOOLS", "/opt/tools")]
+        _ = stubHappyPath(runner, paths: paths, entries: entries)
+        // 开关没被关掉（不在禁用表里），但 plist 不在、也没注册
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
+            exitCode: 113, stdout: "", stderr: "Could not find service"
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "print-disabled", "gui/501"]] = ProcessOutcome(
+            exitCode: 0, stdout: "\tdisabled services = {\n\t\t\"\(label)\" => enabled\n\t}\n", stderr: ""
+        )
+
+        let diagnosis = makeLayer(home: home, paths: paths, runner: runner).diagnose(entries: entries)
+
+        let backgroundItem = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.backgroundItem })
+        #expect(backgroundItem.status == .ok)
+        #expect(!backgroundItem.detail.contains("重放"))
+        let agentFile = try #require(diagnosis.checks.first { $0.name == GuiCheckTitle.agentFile })
+        #expect(agentFile.detail.contains("登录时不会重放变量"))
     }
 }

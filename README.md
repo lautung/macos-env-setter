@@ -27,7 +27,7 @@ swift run envsetter status           # 漂移、记录、备份
 swift run envsetter adopt            # 预览收编计划（不落盘）
 swift run envsetter adopt --apply    # 执行收编并应用
 swift run envsetter restore [文件名] # 列出 / 恢复备份
-swift run envsetter gui              # 诊断 GUI 层（脚本 / LaunchAgent / 后台项 / 注入值）
+swift run envsetter gui              # 诊断 GUI 层（脚本 / LaunchAgent 文件 / 注册 / 后台项 / 注入值 / 残留）
 ```
 
 ## 测试

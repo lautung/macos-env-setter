@@ -15,7 +15,7 @@ func printUsage() {
           adopt --apply     执行收编并显式应用（先备份；含 GUI 层同步）
           restore           列出备份
           restore <文件名>  恢复指定备份
-          gui               诊断 GUI 层（脚本 / LaunchAgent / 登录项 / 注入值）
+          gui               诊断 GUI 层（脚本 / LaunchAgent 文件 / 注册 / 后台项 / 注入值 / 残留）
           gui --sync        只重跑 GUI 层：重写 setenv.sh、注册 LaunchAgent、立即注入当前会话
         """
     )

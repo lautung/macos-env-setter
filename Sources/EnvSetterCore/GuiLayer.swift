@@ -65,6 +65,26 @@ public struct GuiCheck: Equatable, Sendable {
     }
 }
 
+/// 诊断清单的行标题：只说「在查什么」的名词短语，结论只由图标（`status`）与详情表达。
+///
+/// 三条契约（界面与测试都依赖，改动前先想清楚）：
+/// 同一份诊断里标题唯一——清单以标题作行身份（`List(…, id: \.name)`）；
+/// 标题跨状态恒定——空态、健康态、故障态下同一行是同一个标题，空态才不会读出「已注册 / 尚未注册」这种矛盾句；
+/// 顺序即 `checklist` 的顺序（脚本 → plist → 注册 → 后台项 → 注入值 → 残留）。
+public enum GuiCheckTitle {
+    public static let script = "GUI 层脚本"
+    public static let agentFile = "LaunchAgent 文件"
+    public static let agentRegistration = "LaunchAgent 注册"
+    public static let backgroundItem = "后台项状态"
+    public static let injectedValues = "当前会话注入值"
+    public static let disabledLeftovers = "已关闭变量的残留"
+
+    /// 清单里六行的标题，按呈现顺序。
+    public static let checklist = [
+        script, agentFile, agentRegistration, backgroundItem, injectedValues, disabledLeftovers,
+    ]
+}
+
 /// GUI 层的只读体检结果。
 public struct GuiDiagnosis: Equatable, Sendable {
     public var checks: [GuiCheck]
@@ -240,7 +260,10 @@ public final class GuiLayer: Sendable {
 
     // MARK: - 诊断
 
-    /// 只读体检：脚本、LaunchAgent、注册状态、后台项开关、注入值逐项检查。
+    /// 只读体检：脚本、LaunchAgent、注册状态、后台项开关、注入值、已关闭变量的残留逐项检查。
+    ///
+    /// 六行恒定：每行的标题是名词短语、不随状态变化（见 `GuiCheckTitle`），
+    /// 结论只写在详情里——空态下才读不出「标题说已注册、详情说尚未注册」这类矛盾句。
     public func diagnose(entries: [ManagedEntry]) -> GuiDiagnosis {
         var checks: [GuiCheck] = []
         let enabled = SetenvScript.enabledKeys(entries: entries)
@@ -252,11 +275,13 @@ public final class GuiLayer: Sendable {
         // 1. 脚本
         if let onDisk = readString(paths.guiScriptURL) {
             if onDisk == scriptContent(entries: entries) {
-                checks.append(GuiCheck(name: "GUI 层脚本", detail: "\(enabled.count) 个变量，与当前配置一致", status: .ok))
+                checks.append(
+                    GuiCheck(name: GuiCheckTitle.script, detail: "\(enabled.count) 个变量，与当前配置一致", status: .ok)
+                )
             } else {
                 checks.append(
                     GuiCheck(
-                        name: "GUI 层脚本",
+                        name: GuiCheckTitle.script,
                         detail: "内容与当前配置不一致：被手工改过或配置有未应用的改动（应用时会整份重写）",
                         status: .warning
                     )
@@ -265,21 +290,21 @@ public final class GuiLayer: Sendable {
         } else {
             checks.append(
                 GuiCheck(
-                    name: "GUI 层脚本",
+                    name: GuiCheckTitle.script,
                     detail: enabled.isEmpty ? "尚未创建（当前没有启用 GUI 层的变量）" : "尚未创建：应用后会生成",
                     status: enabled.isEmpty ? .ok : .warning
                 )
             )
         }
 
-        // 2. LaunchAgent
+        // 2. LaunchAgent 文件
         if let data = try? Data(contentsOf: plistURL) {
             let matches = LaunchAgent.plistMatches(
                 existing: data, label: label, scriptPath: paths.guiScriptURL.path
             )
             checks.append(
                 GuiCheck(
-                    name: "LaunchAgent",
+                    name: GuiCheckTitle.agentFile,
                     detail: matches
                         ? "\(plistURL.lastPathComponent) 内容正确"
                         : "\(plistURL.lastPathComponent) 内容与目标不符（应用时会重写并重新注册）",
@@ -289,7 +314,7 @@ public final class GuiLayer: Sendable {
         } else {
             checks.append(
                 GuiCheck(
-                    name: "LaunchAgent",
+                    name: GuiCheckTitle.agentFile,
                     detail: needsAgent
                         ? "\(plistURL.path) 不存在，登录时不会重放变量"
                         : "尚未安装（当前没有启用 GUI 层的变量）",
@@ -302,7 +327,7 @@ public final class GuiLayer: Sendable {
         let registered = isRegistered()
         checks.append(
             GuiCheck(
-                name: "agent 已注册",
+                name: GuiCheckTitle.agentRegistration,
                 detail: registered
                     ? "\(label) 已在 \(domain)"
                     : (needsAgent
@@ -317,58 +342,70 @@ public final class GuiLayer: Sendable {
         case .disabled:
             checks.append(
                 GuiCheck(
-                    name: "后台项未被禁用",
+                    name: GuiCheckTitle.backgroundItem,
                     detail: "该登录项在系统设置里被关闭：登录时不会重放变量（系统设置 → 通用 → 登录项与扩展 → 后台允许）",
                     status: .failed
                 )
             )
         case .enabled:
-            checks.append(GuiCheck(name: "后台项未被禁用", detail: "launchd 未禁用该服务", status: .ok))
+            checks.append(
+                GuiCheck(
+                    name: GuiCheckTitle.backgroundItem,
+                    // 只说这一行量到的东西：系统设置里的开关没被关掉。
+                    // 「登录时会重放变量」是装没装、注册没注册的事，那是上面两行的结论——
+                    // 在这里替它们下结论，agent 缺失时就会读出自相矛盾的清单。
+                    detail: needsAgent ? "未被系统设置禁用" : "未被系统设置禁用（当前没有启用 GUI 层的变量）",
+                    status: .ok
+                )
+            )
         case .unknown(let reason):
-            checks.append(GuiCheck(name: "后台项未被禁用", detail: "无法判断：\(reason)", status: .warning))
+            checks.append(
+                GuiCheck(name: GuiCheckTitle.backgroundItem, detail: "无法判断：\(reason)", status: .warning)
+            )
         }
 
         // 5. 注入值
-        if let expected = printedValues() {
-            if enabled.isEmpty {
-                checks.append(GuiCheck(name: "值已注入当前会话", detail: "当前没有启用 GUI 层的变量", status: .ok))
-            } else {
-                let mismatches = mismatches(expected: expected, keys: enabled)
-                if mismatches.isEmpty {
-                    checks.append(
-                        GuiCheck(
-                            name: "值已注入当前会话",
-                            detail: "\(enabled.count)/\(enabled.count) 与脚本一致",
-                            status: .ok
-                        )
-                    )
-                } else {
-                    let detail = mismatches.map { mismatch in
-                        "\(mismatch.key)（域里：\(mismatch.actual ?? "（不存在）")，脚本算的是：\(mismatch.expected)）"
-                    }.joined(separator: "；")
-                    checks.append(GuiCheck(name: "值已注入当前会话", detail: detail, status: .failed))
-                }
-            }
-            // 6. 残留：脚本此前注入过、如今已关闭，但域里还留着
-            let leftovers = leftoverKeys(entries: entries)
-            if !leftovers.isEmpty {
+        if enabled.isEmpty {
+            checks.append(
+                GuiCheck(name: GuiCheckTitle.injectedValues, detail: "当前没有启用 GUI 层的变量", status: .ok)
+            )
+        } else if let expected = printedValues() {
+            let mismatches = mismatches(expected: expected, keys: enabled)
+            if mismatches.isEmpty {
                 checks.append(
                     GuiCheck(
-                        name: "无已关闭变量的残留",
-                        detail: "这些变量已关闭 GUI 层，但仍留在 gui 域（应用后清除）：\(leftovers.joined(separator: "、"))",
-                        status: .warning
+                        name: GuiCheckTitle.injectedValues,
+                        detail: "\(enabled.count)/\(enabled.count) 与脚本一致",
+                        status: .ok
                     )
                 )
+            } else {
+                let detail = mismatches.map { mismatch in
+                    "\(mismatch.key)（域里：\(mismatch.actual ?? "（不存在）")，脚本算的是：\(mismatch.expected)）"
+                }.joined(separator: "；")
+                checks.append(GuiCheck(name: GuiCheckTitle.injectedValues, detail: detail, status: .failed))
             }
         } else {
             checks.append(
                 GuiCheck(
-                    name: "值已注入当前会话",
+                    name: GuiCheckTitle.injectedValues,
                     detail: "无法读取脚本内容，跳过回读比对",
-                    status: enabled.isEmpty ? .ok : .warning
+                    status: .warning
                 )
             )
         }
+
+        // 6. 残留：脚本此前注入过、如今已关闭，但域里还留着
+        let leftovers = leftoverKeys(entries: entries)
+        checks.append(
+            leftovers.isEmpty
+                ? GuiCheck(name: GuiCheckTitle.disabledLeftovers, detail: "没有——已关闭 GUI 层的变量都不在 gui 域里", status: .ok)
+                : GuiCheck(
+                    name: GuiCheckTitle.disabledLeftovers,
+                    detail: "这些变量已关闭 GUI 层，但仍留在 gui 域（应用后清除）：\(leftovers.joined(separator: "、"))",
+                    status: .warning
+                )
+        )
 
         return GuiDiagnosis(checks: checks)
     }
