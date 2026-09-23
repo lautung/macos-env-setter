@@ -129,6 +129,10 @@ public final class GuiLayer: Sendable {
 
     /// 跑脚本时的子进程环境，与 launchd 给 agent 的环境对齐（HOME + 默认 PATH）。
     /// 对齐是为了让「应用时即时注入」与「下次登录由 agent 重放」展开出同样的值。
+    ///
+    /// 对齐的是**登录时**那一次重放。固定 PATH 是刻意的：期望值只取决于配置，不取决于跑脚本的进程
+    /// 恰好继承到什么。代价是会话中重跑 agent（重注册触发 `RunAtLoad`）时它继承到的是 gui 域的实时 PATH，
+    /// `$PATH` 会解析成那个值，与这里算出的期望值不同——回读据此告警（见 ADR-0001「期望值的环境」）。
     public static func launchdLikeEnvironment() -> [String: String] {
         let user = NSUserName()
         return [

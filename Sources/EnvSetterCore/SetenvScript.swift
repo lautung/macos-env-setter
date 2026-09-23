@@ -3,7 +3,7 @@ import Foundation
 /// GUI 层脚本（`setenv.sh`）：工具生成、由 LaunchAgent 在登录时执行，把变量注入 launchd 的 gui 域。
 ///
 /// 两段式，与 shell 层标记块共用同一套引用语义：
-/// 1. 先按声明顺序做 shell 变量赋值——`$` 引用（含 `${…}`）在这一步展开，`$PATH` 锚点展开为 launchd 的默认 PATH；
+/// 1. 先按声明顺序做 shell 变量赋值——`$` 引用（含 `${…}`）在这一步展开，`$PATH` 锚点展开为脚本进程继承到的 PATH（登录时即 launchd 的默认 PATH）；
 /// 2. 再逐条 `/bin/launchctl setenv KEY "$KEY"`，取赋值结果注入 gui 域（用绝对路径，不受脚本内 PATH 赋值影响）。
 ///
 /// `--print` 只打印将要注入的 `KEY=VALUE`、不调用 launchctl，供应用后的回读自检与诊断比对期望值。

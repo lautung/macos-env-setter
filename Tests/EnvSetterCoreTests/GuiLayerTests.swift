@@ -181,6 +181,27 @@ struct GuiLayerTests {
         }
     }
 
+    /// 跑脚本（算期望值 + 即时注入）用的是固定的 launchd-like 环境，不是本进程继承到的环境。
+    ///
+    /// 这条撑住 apply 的幂等：PATH 记录里的 `$PATH` 锚点若跟着本进程的 PATH 走，每应用一次就会把目录再前插一遍
+    /// ——本工具注入的 PATH 恰恰是本进程 PATH 的来源之一（Dock 启动的 App 继承的就是 gui 域）。
+    @Test func scriptRunsInTheLaunchdLikeEnvironmentNotTheCallers() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let entries: [ManagedEntry] = [record("PATH", "/opt/tools/bin:$PATH")]
+        _ = stubHappyPath(runner, paths: paths, entries: entries)
+        // 不传 environment：走 GuiLayer 自己的 launchd-like 默认值
+        let layer = GuiLayer(paths: paths, label: label, runner: runner, uid: 501)
+
+        _ = layer.apply(entries: entries)
+
+        let runs = runner.calls(matching: LaunchAgent.shellPath, firstArgument: paths.guiScriptURL.path)
+        #expect(!runs.isEmpty)
+        for run in runs {
+            #expect(run.environment["PATH"] == LaunchAgent.defaultPath)
+        }
+    }
+
     @Test func applyDoesNotReinstallOrRebootstrapWhenNothingChanged() throws {
         let (home, paths) = try TestSupport.makeSandbox()
         let runner = FakeProcessRunner()

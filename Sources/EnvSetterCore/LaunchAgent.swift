@@ -7,8 +7,9 @@ public enum LaunchAgent {
     public static let defaultLabel = "com.lautung.env-setter"
     public static let launchctlPath = "/bin/launchctl"
     public static let shellPath = "/bin/sh"
-    /// launchd 给 agent 的默认 PATH（同 `sysctl -n user.cs_path`）；
-    /// GUI 层的 `$PATH` 锚点解析成它，而不是终端里的 PATH。
+    /// launchd 给 agent 的默认 PATH（同 `sysctl -n user.cs_path`）。
+    /// 登录时 agent 启动继承到的就是它，GUI 层的 `$PATH` 锚点在那一刻解析成它——不是终端里的 PATH。
+    /// 工具算期望值时也固定用它（见 `GuiLayer.launchdLikeEnvironment`），与跑脚本的进程继承到什么无关。
     public static let defaultPath = "/usr/bin:/bin:/usr/sbin:/sbin"
 
     public static func plistURL(label: String, paths: EnginePaths) -> URL {
