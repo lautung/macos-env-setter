@@ -133,7 +133,7 @@ struct AdoptionSheet: View {
                     }
                 }
                 if !plan.skipped.isEmpty {
-                    Section("跳过（看不懂的行，保持原样）") {
+                    Section("跳过（保持原样，未收编）") {
                         ForEach(plan.skipped.indices, id: \.self) { index in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(plan.skipped[index].line)
@@ -337,12 +337,20 @@ struct DiagnosticsSheet: View {
 
             HStack {
                 Button("重新体检") { Task { await model.openDiagnostics() } }
+                Button("重试 GUI 同步") { Task { await model.retryGuiSync() } }
+                    .disabled(!model.canRetryGuiSync)
+                    .help(model.guiRetryHelp)
                 if backgroundItemIssue {
                     Button("打开系统设置的登录项面板") { model.openLoginItemsSettings() }
                 }
                 Spacer()
                 Button("完成") { model.dismissSheet() }
                     .keyboardShortcut(.defaultAction)
+            }
+            if model.pendingCount > 0 {
+                Text(model.draftBlockedNotice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
         .padding(18)

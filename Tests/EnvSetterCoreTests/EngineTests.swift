@@ -3,6 +3,29 @@ import Foundation
 @testable import EnvSetterCore
 
 struct EngineTests {
+    private let guiLabel = "com.example.envsetter-test"
+
+    /// GUI 层测试的固定装置：固定 label 与 launchd-like 环境的引擎（与 `GuiLayerTests.makeLayer` 同构）。
+    private func makeGuiEngine(home: URL, paths: EnginePaths, runner: FakeProcessRunner) -> EnvSetterEngine {
+        EnvSetterEngine(
+            paths: paths,
+            gui: GuiLayer(
+                paths: paths,
+                label: guiLabel,
+                runner: runner,
+                environment: ["HOME": home.path, "PATH": LaunchAgent.defaultPath],
+                uid: 501
+            )
+        )
+    }
+
+    /// 让假执行器回答「没注册」：本工具没装过任何东西时的正常状态。
+    private func stubUnregistered(_ runner: FakeProcessRunner) {
+        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(guiLabel)"]] = ProcessOutcome(
+            exitCode: 113, stdout: "", stderr: "Could not find service"
+        )
+    }
+
     @Test func freshSandboxLoadsEmpty() throws {
         let (_, paths) = try TestSupport.makeSandbox()
         let engine = EnvSetterEngine(paths: paths)
@@ -198,16 +221,7 @@ struct EngineTests {
     @Test func removingAGuiRecordClearsItsKeyFromTheDomain() throws {
         let (home, paths) = try TestSupport.makeSandbox()
         let runner = FakeProcessRunner()
-        let engine = EnvSetterEngine(
-            paths: paths,
-            gui: GuiLayer(
-                paths: paths,
-                label: "com.example.envsetter-test",
-                runner: runner,
-                environment: ["HOME": home.path, "PATH": LaunchAgent.defaultPath],
-                uid: 501
-            )
-        )
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
         let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
         let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
         _ = try engine.apply(entries: [a, b])
@@ -231,27 +245,213 @@ struct EngineTests {
         let callsBefore = runner.calls.count
         _ = try engine.apply(entries: [a])
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"], since: callsBefore))
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"]))
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
+    }
+
+    @Test func failedGuiRemovalSurvivesEngineRecreationAndRetry() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        stubUnregistered(runner)
+
+        let firstEngine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        let applied = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        _ = try firstEngine.apply(entries: [applied])
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "A"]] = ProcessOutcome(
+            exitCode: 0, stdout: "stale\n", stderr: ""
+        )
+
+        let removed = try firstEngine.apply(entries: [])
+        #expect(removed.gui?.pendingGuiRemovals == ["A"])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
+        let leftover = try #require(
+            firstEngine.guiDiagnosis()?.checks.first { $0.name == GuiCheckTitle.disabledLeftovers }
+        )
+        #expect(leftover.status == .warning)
+        #expect(leftover.detail.contains("A"))
+
+        // 新引擎实例不再依赖旧脚本也能从落盘的待清理残留发现并重试。
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 0, stdout: "", stderr: ""
+        )
+        let retry = try #require(try makeGuiEngine(home: home, paths: paths, runner: runner).retryGuiSync())
+        #expect(retry.pendingGuiRemovals.isEmpty)
+        #expect(retry.outcome == .uninstalled)
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
+    }
+
+    /// 审查发现的原始形态：**其他 GUI 变量还在**时，脚本会被重写成不含 A——旧脚本从此给不出线索，
+    /// 只剩持久化的待清理残留。清不掉时这份记录必须活下来，重建引擎实例后仍能发现并清除。
+    @Test func failedGuiRemovalIsRetriedWhileOtherGuiVariablesRemain() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        stubUnregistered(runner)
+
+        let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        _ = try engine.apply(entries: [a, b])
+
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "A"]] = ProcessOutcome(
+            exitCode: 0, stdout: "stale\n", stderr: ""
+        )
+        let removed = try engine.apply(entries: [b])
+
+        #expect(removed.gui?.outcome == .partial)
+        #expect(removed.gui?.removedKeys == ["A"])
+        #expect(removed.gui?.pendingGuiRemovals == ["A"])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
+        // B 还在，所以脚本被重写成只剩 B：A 的 key 从脚本里消失，旧脚本再也提供不了线索
+        let script = try TestSupport.read(paths.guiScriptURL)
+        #expect(script.contains("B="))
+        #expect(!script.contains("A="))
+
+        // 再应用一次：待清理残留不能因为脚本里已经没有 A 而被抹掉
+        _ = try engine.apply(entries: [b])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
+        let leftover = try #require(
+            engine.guiDiagnosis()?.checks.first { $0.name == GuiCheckTitle.disabledLeftovers }
+        )
+        #expect(leftover.status == .warning)
+        #expect(leftover.detail.contains("A"))
+
+        // 重建引擎实例后重试仍然失败：记录继续留着（重试失败也不能丢）
+        let callsBeforeRetry = runner.calls.count
+        _ = try #require(try makeGuiEngine(home: home, paths: paths, runner: runner).retryGuiSync())
+        #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBeforeRetry))
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
+
+        // 清成了：记录清空，仍在启用的 B 不受影响
+        let callsBeforeSuccess = runner.calls.count
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 0, stdout: "", stderr: ""
+        )
+        let retry = try #require(try makeGuiEngine(home: home, paths: paths, runner: runner).retryGuiSync())
+
+        #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBeforeSuccess))
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"], since: callsBeforeSuccess))
+        #expect(retry.pendingGuiRemovals.isEmpty)
+        #expect(retry.outcome == .applied)
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
+        #expect(try TestSupport.read(paths.guiScriptURL).contains("B="))
+    }
+
+    @Test func reenabledGuiKeyIsRemovedFromPendingCleanupWithoutUnsetenv() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        stubUnregistered(runner)
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        _ = try engine.apply(entries: [a])
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+        _ = try engine.apply(entries: [])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
+
+        let callsBeforeReenable = runner.calls.count
+        let reenabled = try engine.apply(entries: [a])
+
+        #expect(reenabled.gui?.pendingGuiRemovals.isEmpty == true)
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBeforeReenable))
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
+    }
+
+    @Test func retryGuiSyncDoesNotWriteProfileOrCreateBackups() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        let entry = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        let script = paths.guiScriptURL.path
+        runner.outcomes[[LaunchAgent.shellPath, script, SetenvScript.printFlag]] = ProcessOutcome(
+            exitCode: 0, stdout: "A=1\n", stderr: ""
+        )
+        runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "A"]] = ProcessOutcome(
+            exitCode: 0, stdout: "1\n", stderr: ""
+        )
+        _ = try engine.apply(entries: [entry])
+        let profileBeforeRetry = try TestSupport.read(paths.zprofileURL)
+        let backupsBeforeRetry = try engine.backupsList().count
+
+        runner.outcomes[[LaunchAgent.shellPath, script]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "script failed"
+        )
+        let failed = try #require(try engine.retryGuiSync())
+        #expect(failed.outcome == .partial)
+        #expect(failed.warning?.isEmpty == false)
+
+        runner.outcomes[[LaunchAgent.shellPath, script]] = ProcessOutcome(
+            exitCode: 0, stdout: "", stderr: ""
+        )
+        let succeeded = try #require(try engine.retryGuiSync())
+
+        #expect(succeeded.outcome == .applied)
+        #expect(try TestSupport.read(paths.zprofileURL) == profileBeforeRetry)
+        #expect(try engine.backupsList().count == backupsBeforeRetry)
+    }
+
+    /// 块被手工改过（漂移）时，单独重试 GUI 层与显式应用一样先拒绝：
+    /// 本地状态已经不是文件的真相，此时同步只会把陈旧值推进 gui 域。
+    @Test func retryGuiSyncRefusesWhenTheBlockDrifted() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        _ = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))])
+
+        let profile = try TestSupport.read(paths.zprofileURL)
+        try TestSupport.write(
+            profile.replacingOccurrences(of: MarkerBlock.typesetLine, with: MarkerBlock.typesetLine + "\n# drift"),
+            to: paths.zprofileURL
+        )
+
+        let callsBefore = runner.calls.count
+        #expect(throws: EngineError.driftDetected.self) {
+            try engine.retryGuiSync()
+        }
+        // 拒绝得干净：没有碰 gui 域，也没有重写脚本
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBefore))
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["setenv", "A", "1"], since: callsBefore))
+        #expect(try TestSupport.read(paths.guiScriptURL) == engine.gui?.scriptContent(entries: [
+            .record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        ]))
+    }
+
+    @Test func pendingGuiRemovalsSurviveDriftReloadAndBackupRestore() throws {
+        let (_, paths) = try TestSupport.makeSandbox()
+        try TestSupport.write("original profile\n", to: paths.zprofileURL)
+        let engine = EnvSetterEngine(paths: paths)
+        _ = try engine.apply(entries: [.record(VariableRecord(key: "A", rawValue: "1"))])
+        var store = try StorePersistence.load(from: paths.storeURL)
+        store.pendingGuiRemovals = ["OLD"]
+        try StorePersistence.save(store, to: paths.storeURL)
+
+        let profile = try TestSupport.read(paths.zprofileURL)
+        try TestSupport.write(
+            profile.replacingOccurrences(of: MarkerBlock.typesetLine, with: MarkerBlock.typesetLine + "\n# drift"),
+            to: paths.zprofileURL
+        )
+        #expect(try engine.load().driftDetected)
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["OLD"])
+
+        let baseline = try #require(try engine.backupsList().first { $0.isBaseline })
+        try engine.restore(from: baseline)
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["OLD"])
     }
 
     /// 关掉最后一条 GUI 层变量并应用：GUI 层整体撤掉，shell 层逐字节不动。
     @Test func uninstallingTheGuiLayerLeavesTheShellLayerUntouched() throws {
         let (home, paths) = try TestSupport.makeSandbox()
         let runner = FakeProcessRunner()
-        let label = "com.example.envsetter-test"
-        let engine = EnvSetterEngine(
-            paths: paths,
-            gui: GuiLayer(
-                paths: paths,
-                label: label,
-                runner: runner,
-                environment: ["HOME": home.path, "PATH": LaunchAgent.defaultPath],
-                uid: 501
-            )
-        )
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
         // 装上之后注册就没了（bootout 生效）——撤回时不必再取消一次
-        runner.outcomes[[LaunchAgent.launchctlPath, "print", "gui/501/\(label)"]] = ProcessOutcome(
-            exitCode: 113, stdout: "", stderr: "Could not find service"
-        )
+        stubUnregistered(runner)
 
         let on: [ManagedEntry] = [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))]
         let first = try engine.apply(entries: on)
@@ -265,7 +465,7 @@ struct EngineTests {
         #expect(second.shellContent == first.shellContent)
         #expect(try TestSupport.read(paths.zprofileURL) == first.shellContent)
         #expect(!FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
-        #expect(!FileManager.default.fileExists(atPath: LaunchAgent.plistURL(label: label, paths: paths).path))
+        #expect(!FileManager.default.fileExists(atPath: LaunchAgent.plistURL(label: guiLabel, paths: paths).path))
     }
 
     @Test func applyWithoutGuiLayerReportsNoGuiResult() throws {
@@ -357,10 +557,19 @@ struct EngineTests {
                 .record(VariableRecord(key: "B", rawValue: "1", guiEnabled: true, source: .toolCreated)),
                 .verbatim(line: "# keep me"),
             ],
-            blockSnapshot: "# >>> EnvSetter >>>\n...\n# <<< EnvSetter <<<"
+            blockSnapshot: "# >>> EnvSetter >>>\n...\n# <<< EnvSetter <<<",
+            pendingGuiRemovals: ["OLD"]
         )
         let url = home.appending(path: "store.json")
         try StorePersistence.save(store, to: url)
         #expect(try StorePersistence.load(from: url) == store)
+    }
+
+    @Test func oldStoreWithoutPendingRemovalFieldLoadsAsEmpty() throws {
+        let (home, _) = try TestSupport.makeSandbox()
+        let url = home.appending(path: "store.json")
+        try TestSupport.write(#"{"entries":[],"blockSnapshot":null}"#, to: url)
+
+        #expect(try StorePersistence.load(from: url).pendingGuiRemovals.isEmpty)
     }
 }

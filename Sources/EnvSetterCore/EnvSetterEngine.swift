@@ -94,7 +94,34 @@ public final class EnvSetterEngine: Sendable {
     /// 引擎未接入 GUI 层时返回 nil。
     public func guiDiagnosis() throws -> GuiDiagnosis? {
         guard let gui else { return nil }
-        return gui.diagnose(entries: try loadStore().entries)
+        let store = try loadStore()
+        return gui.diagnose(entries: store.entries, pendingGuiRemovals: store.pendingGuiRemovals)
+    }
+
+    /// 只重试 GUI 层：读取已应用状态并同步 launchd，不改写 zprofile，也不创建备份。
+    /// 漂移预检与 `apply` 同一道：块被手工改过时本地状态已不是文件的真相，先把人引到「重新载入」。
+    @discardableResult
+    public func retryGuiSync() throws -> GuiApplyReport? {
+        guard let gui else { return nil }
+        var store = try loadStore()
+        try requireNoDrift(store: store, location: try MarkerBlock.locate(in: try readZprofile()))
+        let previouslyManagedKeys = Set(store.entries.compactMap(\.key))
+        store.pendingGuiRemovals = gui.pendingRemovalKeys(
+            entries: store.entries,
+            previouslyManagedKeys: previouslyManagedKeys,
+            pendingGuiRemovals: store.pendingGuiRemovals
+        )
+        // 必须先落下待清理残留，再让 GUI 层覆盖记录旧 key 的 setenv.sh。
+        try StorePersistence.save(store, to: paths.storeURL)
+
+        let report = gui.apply(
+            entries: store.entries,
+            previouslyManagedKeys: previouslyManagedKeys,
+            pendingGuiRemovals: store.pendingGuiRemovals
+        )
+        store.pendingGuiRemovals = report.pendingGuiRemovals
+        try StorePersistence.save(store, to: paths.storeURL)
+        return report
     }
 
     // MARK: - 显式应用
@@ -112,16 +139,14 @@ public final class EnvSetterEngine: Sendable {
         var store = try loadStore()
         // 上次应用时工具拥有哪些 key：本次被移除的记录也在其中，GUI 层据此把它的 key 从 gui 域里清掉。
         let previouslyManagedKeys = Set(store.entries.compactMap(\.key))
+        let pendingGuiRemovals = gui?.pendingRemovalKeys(
+            entries: entries,
+            previouslyManagedKeys: previouslyManagedKeys,
+            pendingGuiRemovals: store.pendingGuiRemovals
+        ) ?? store.pendingGuiRemovals
         let content = try readZprofile()
         let location = try MarkerBlock.locate(in: content)
-
-        if let snapshot = store.blockSnapshot {
-            if let location {
-                guard location.fullText == snapshot else { throw EngineError.driftDetected }
-            } else {
-                throw EngineError.driftDetected
-            }
-        }
+        try requireNoDrift(store: store, location: location)
 
         for edit in outsideEdits {
             guard let line = FileText(content).line(at: edit.lineIndex), line == edit.originalLine else {
@@ -155,12 +180,22 @@ public final class EnvSetterEngine: Sendable {
 
         store.entries = entries
         store.blockSnapshot = newBlock
+        store.pendingGuiRemovals = pendingGuiRemovals
         try StorePersistence.save(store, to: paths.storeURL)
 
         // shell 层已落盘、状态已保存，之后才碰 launchd：GUI 层出问题也回不去影响上面。
+        let guiReport = gui?.apply(
+            entries: entries,
+            previouslyManagedKeys: previouslyManagedKeys,
+            pendingGuiRemovals: pendingGuiRemovals
+        )
+        if let guiReport {
+            store.pendingGuiRemovals = guiReport.pendingGuiRemovals
+            try StorePersistence.save(store, to: paths.storeURL)
+        }
         return ApplyResult(
             shellContent: newContent,
-            gui: gui?.apply(entries: entries, previouslyManagedKeys: previouslyManagedKeys)
+            gui: guiReport
         )
     }
 
@@ -211,6 +246,13 @@ public final class EnvSetterEngine: Sendable {
 
     // MARK: - Private
 
+    /// 漂移预检：本地状态记着块的快照、而文件里的块对不上（或块整个没了）时拒绝写入。
+    /// 两个写路径（显式应用、单独重试 GUI 层）共用同一道检查，前置条件才不会各说各话。
+    private func requireNoDrift(store: EnvStore, location: MarkerBlock.Location?) throws {
+        guard let snapshot = store.blockSnapshot else { return }
+        guard let location, location.fullText == snapshot else { throw EngineError.driftDetected }
+    }
+
     /// 以文件为准重新载入：解析标记块内容，
     /// 已有记录按 key 合并（值取文件、shell 开，GUI 开关与来源保留），
     /// 新 key 收编为导入记录；文件里消失的 shell 记录停用（shell 关）；文件里无法解析的行逐字保留。
@@ -250,7 +292,11 @@ public final class EnvSetterEngine: Sendable {
                 merged.append(.record(record))
             }
         }
-        return EnvStore(entries: merged, blockSnapshot: location.fullText)
+        return EnvStore(
+            entries: merged,
+            blockSnapshot: location.fullText,
+            pendingGuiRemovals: store.pendingGuiRemovals
+        )
     }
 
     /// 块不存在（被用户删除或恢复到无块备份）时的以文件为准：全部记录 shell 停用。

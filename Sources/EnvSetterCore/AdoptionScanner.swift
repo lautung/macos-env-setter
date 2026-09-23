@@ -44,6 +44,17 @@ public enum AdoptionScanner {
         var skipped: [SkippedLine] = []
         var newRecords: [VariableRecord] = []
         var newRecordIndexByKey: [String: Int] = [:]
+        // 只记录当前文件里的实际赋值；本地记录若关闭 shell 层，不会在块中赋值。
+        let blockEntries = location.map { MarkerBlock.parse(innerContent: $0.innerContent) } ?? []
+        let blockAssignedKeys = Set(blockEntries.compactMap(\.key))
+        // 块内那些看不懂的行里提到的 key：工具不知道它们到底有没有被赋值，所以不猜——
+        // 这些 key 的块外同名赋值一律保持原样、本次不收编（见下面循环里的跳过分支）。
+        let blockMayAssign = Set(
+            blockEntries.flatMap { entry -> [String] in
+                guard case .verbatim(let line) = entry else { return [] }
+                return mentionedKeys(in: line)
+            }
+        ).subtracting(blockAssignedKeys)
         // PATH 来源：按文件出现顺序收集的原始值（含已有的 PATH 记录）。
         var pathSources: [(position: Int, rawValue: String)] = []
         var outsidePathLineCount = 0
@@ -64,6 +75,20 @@ public enum AdoptionScanner {
             }
             let line = file.line(at: index)!
             if let parsed = ShellLine.parseExportLine(line) {
+                // 块内有一行看不懂的内容可能也给这个 key 赋值：不猜谁最后生效。
+                // 原行保持原样（不注释、不改记录、不收编），计划里报出来让人自己决定。
+                if parsed.key != VariableKeys.path, let location, index < location.beginLineIndex,
+                    blockMayAssign.contains(parsed.key)
+                {
+                    skipped.append(
+                        SkippedLine(
+                            lineIndex: index,
+                            line: line,
+                            reason: "块内有一行看不懂的内容可能也给 \(parsed.key) 赋值，不猜谁最后生效"
+                        )
+                    )
+                    continue
+                }
                 outsideEdits.append(
                     OutsideEdit(lineIndex: index, originalLine: line, replacementLine: "# " + line)
                 )
@@ -103,13 +128,20 @@ public enum AdoptionScanner {
             }
         }
 
-        // 已有记录里被块外同名行覆盖的，值取块外最后一次出现的值（zsh 后写覆盖）。
+        // 已有记录只由它后面的块外赋值覆盖。块前的同名 export 会被标记块内赋值覆盖，
+        // 收编后这些行会注释掉，故应保留块内值；块后的 export 则仍是最后一次赋值。
+        // （块内只有看不懂的行可能赋值的 key 上面已按「不猜」跳过，不会走到这里。）
         var mergedEntries = currentEntries
         if !touchedManagedKeys.isEmpty {
             for index in mergedEntries.indices {
                 if case .record(var record) = mergedEntries[index],
                     touchedManagedKeys.contains(record.key),
-                    let outside = lastOutsideValue(key: record.key, file: file, edits: outsideEdits)
+                    let outside = lastOutsideValue(
+                        key: record.key,
+                        file: file,
+                        edits: outsideEdits,
+                        afterLineIndex: blockAssignedKeys.contains(record.key) ? location?.endLineIndex : nil
+                    )
                 {
                     record.rawValue = outside.rawValue
                     record.quoteStyle = outside.quoteStyle
@@ -145,9 +177,46 @@ public enum AdoptionScanner {
 
     // MARK: - Private
 
-    private static func lastOutsideValue(key: String, file: FileText, edits: [OutsideEdit]) -> ParsedExport? {
+    /// 一行看不懂的内容里可能被赋值的 key（`KEY=` 形态的 token）。
+    /// 只用来决定「这次不动它」，绝不用来定值——假命中的代价是少收编一条 + 一条提示，
+    /// 而猜错的代价是悄悄改掉一个环境变量的生效值。
+    private static func mentionedKeys(in line: String) -> [String] {
+        let characters = Array(line)
+        var keys: [String] = []
+        var index = 0
+        while index < characters.count {
+            guard isKeyStart(characters[index]) else {
+                index += 1
+                continue
+            }
+            var end = index
+            while end < characters.count, isKeyCharacter(characters[end]) { end += 1 }
+            if end < characters.count, characters[end] == "=" {
+                let candidate = String(characters[index..<end])
+                if ShellLine.isSimpleKey(candidate) { keys.append(candidate) }
+            }
+            index = max(end, index + 1)
+        }
+        return keys
+    }
+
+    private static func isKeyStart(_ character: Character) -> Bool {
+        character.isLetter || character == "_"
+    }
+
+    private static func isKeyCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_"
+    }
+
+    private static func lastOutsideValue(
+        key: String,
+        file: FileText,
+        edits: [OutsideEdit],
+        afterLineIndex: Int? = nil
+    ) -> ParsedExport? {
         var value: ParsedExport?
         for edit in edits {
+            if let afterLineIndex, edit.lineIndex <= afterLineIndex { continue }
             guard let line = file.line(at: edit.lineIndex),
                 let parsed = ShellLine.parseExportLine(line), parsed.key == key
             else { continue }

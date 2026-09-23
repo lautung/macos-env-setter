@@ -70,6 +70,7 @@ struct LayerChips: View {
 struct BannerView: View {
     let banner: AppModel.Banner
     let dismiss: () -> Void
+    let openDiagnostics: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -78,6 +79,11 @@ struct BannerView: View {
             Text(banner.text)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+            if banner.opensDiagnostics {
+                Button("诊断与重试", action: openDiagnostics)
+                    .buttonStyle(.link)
+                    .fixedSize()
+            }
             Button(action: dismiss) {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
             }
@@ -99,7 +105,11 @@ struct BannerBar: View {
 
     var body: some View {
         if let banner = model.banner {
-            BannerView(banner: banner) { model.banner = nil }
+            BannerView(
+                banner: banner,
+                dismiss: { model.banner = nil },
+                openDiagnostics: { Task { await model.openDiagnostics() } }
+            )
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
                 .frame(maxWidth: .infinity)

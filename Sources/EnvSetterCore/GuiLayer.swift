@@ -34,8 +34,10 @@ public struct GuiApplyReport: Equatable, Sendable {
     public var scriptURL: URL
     /// 本次写入脚本的变量（声明顺序）。
     public var keys: [String]
-    /// 本次从 gui 域清除的变量（此前由本工具写入、如今不再启用）。
+    /// 本次**尝试**从 gui 域清除的变量（此前由本工具写入、如今不再启用）；没清成的见 `pendingGuiRemovals`。
     public var removedKeys: [String]
+    /// 本次仍未清除的待清理残留（见 CONTEXT.md）；引擎据此更新本地状态，供下次重试。
+    public var pendingGuiRemovals: [String]
     public var scriptWritten: Bool
     public var agentInstalled: Bool
     public var agentRegistered: Bool
@@ -102,7 +104,7 @@ public struct GuiDiagnosis: Equatable, Sendable {
 /// GUI 层（launchd 域）的读写：生成/重写 setenv.sh、装并注册 LaunchAgent、应用时即时注入当前会话、回读自检与诊断。
 ///
 /// 边界：本工具只拥有 `~/Library/LaunchAgents/<label>.plist` 与 `~/Library/Application Support/EnvSetter/setenv.sh`；
-/// 从不清除「自己没拥有过」的变量（既不在当前记录里、也不在上次应用的记录里），
+/// 从不清除「自己没拥有过」的变量——所有权有三种来源：当前记录、上次应用的记录、待清理残留（三者都只会是工具写过的 key），
 /// 避免踩到别的工具往 gui 域注入的同名变量。
 /// 这两样东西也只在有 GUI 层变量时存在：关掉最后一条并应用即整体撤掉（没有 GUI 层变量 ⇒ 没有脚本、没有 plist、没有注册）。
 public final class GuiLayer: Sendable {
@@ -150,6 +152,45 @@ public final class GuiLayer: Sendable {
         SetenvScript.generate(entries: entries, label: label)
     }
 
+    /// 在重写脚本前确定本工具拥有、且这次要清的待清理残留。
+    /// 旧脚本只提供历史线索：必须仍对应当前或上次已管理的记录；已落盘的待清理残留本身则是所有权记录。
+    func pendingRemovalKeys(
+        entries: [ManagedEntry],
+        previouslyManagedKeys: Set<String> = [],
+        pendingGuiRemovals: [String] = []
+    ) -> [String] {
+        let context = ownershipContext(entries: entries)
+        var result = pendingGuiRemovals.filter { !context.enabled.contains($0) }
+        var included = Set(result)
+        for key in context.staleScriptKeys(ownedBy: previouslyManagedKeys) where included.insert(key).inserted {
+            result.append(key)
+        }
+        return result
+    }
+
+    /// 判定「这个 key 归不归本工具管」所需的三组 key：启用中的、记录里的、脚本历史里的。
+    /// 三组一起算，所有权规则就只有一处——清理（`pendingRemovalKeys`）与诊断（`leftoverKeys`）不会各算各的。
+    private struct OwnershipContext {
+        let enabled: Set<String>
+        let known: Set<String>
+        let scriptKeys: [String]
+
+        init(entries: [ManagedEntry], scriptContent: String) {
+            enabled = Set(SetenvScript.enabledKeys(entries: entries))
+            known = Set(entries.compactMap(\.key))
+            scriptKeys = SetenvScript.appliedKeys(in: scriptContent)
+        }
+
+        /// 脚本历史里「本工具拥有过、如今不再启用」的 key：拥有 = 现在在记录里，或上次应用时在记录里。
+        func staleScriptKeys(ownedBy previouslyManagedKeys: Set<String>) -> [String] {
+            scriptKeys.filter { !enabled.contains($0) && (known.contains($0) || previouslyManagedKeys.contains($0)) }
+        }
+    }
+
+    private func ownershipContext(entries: [ManagedEntry]) -> OwnershipContext {
+        OwnershipContext(entries: entries, scriptContent: readString(paths.guiScriptURL) ?? "")
+    }
+
     // MARK: - 同步
 
     /// 显式应用时的 GUI 层同步：写脚本 → 装/更新 LaunchAgent 并注册 → 立即注入当前会话 → 回读自检。
@@ -163,21 +204,24 @@ public final class GuiLayer: Sendable {
     /// 不变式是**没有 GUI 层变量 ⇒ 没有脚本、没有 plist、没有注册**。
     public func apply(
         entries: [ManagedEntry],
-        previouslyManagedKeys: Set<String> = []
+        previouslyManagedKeys: Set<String> = [],
+        pendingGuiRemovals: [String]? = nil
     ) -> GuiApplyReport {
         let enabled = SetenvScript.enabledKeys(entries: entries)
-        let known = entries.compactMap(\.key)
-        let previous = SetenvScript.appliedKeys(in: readString(paths.guiScriptURL) ?? "")
-        // 只清除本工具写过的 key：上次脚本注入过，且它当时或现在还在记录里。
-        let removals = previous.filter { key in
-            !enabled.contains(key) && (known.contains(key) || previouslyManagedKeys.contains(key))
-        }
+        // 引擎传入的列表已在脚本覆盖前持久化；独立使用 GUI 层时才从旧脚本补充历史 key。
+        let removals = pendingGuiRemovals.map { keys in
+            keys.filter { !enabled.contains($0) }
+        } ?? self.pendingRemovalKeys(
+            entries: entries,
+            previouslyManagedKeys: previouslyManagedKeys
+        )
 
         var report = GuiApplyReport(
             outcome: .skipped,
             scriptURL: paths.guiScriptURL,
             keys: enabled,
             removedKeys: removals,
+            pendingGuiRemovals: removals,
             scriptWritten: false,
             agentInstalled: false,
             agentRegistered: false,
@@ -242,7 +286,9 @@ public final class GuiLayer: Sendable {
         } else {
             problems.append("把变量注入当前会话失败：\(injected.message)")
         }
-        problems += clearInjectedValues(removals)
+        let clearResult = clearInjectedValues(removals)
+        report.pendingGuiRemovals = clearResult.failedKeys
+        problems += clearResult.problems
 
         // 5. 回读自检：gui 域里的值是否真的等于脚本算出的值
         if report.liveSynced, let expected {
@@ -263,7 +309,7 @@ public final class GuiLayer: Sendable {
 
     /// 卸载：没有启用 GUI 层的变量时，把上次装下的脚本、plist 与注册一并撤掉。
     ///
-    /// 本来就没装过（纯 shell 层用户、或刚撤干净）时只查一次注册，什么都不动，`skipped` 原样返回。
+    /// 本来就没装过（纯 shell 层用户、或刚撤干净）、也没有待清理残留时，只查一次注册，什么都不动，`skipped` 原样返回。
     /// 已关闭变量的残留（`removedKeys`）照旧只清本工具写过的 key：launchd 没有标记块那样的隔离区。
     private func uninstall(_ report: GuiApplyReport) -> GuiApplyReport {
         var report = report
@@ -271,7 +317,7 @@ public final class GuiLayer: Sendable {
         let plistExists = FileManager.default.fileExists(atPath: plistURL.path)
         let wasRegistered = isRegistered()
         // 注册也要算：文件被手工删过而 agent 还挂着时，只有注册能说明「这里还有本工具的东西」。
-        guard scriptExists || plistExists || wasRegistered else { return report }
+        guard scriptExists || plistExists || wasRegistered || !report.removedKeys.isEmpty else { return report }
 
         var problems: [String] = []
 
@@ -295,20 +341,21 @@ public final class GuiLayer: Sendable {
         }
 
         // 3. gui 域里的值：只清本工具写过的 key
-        let valueProblems = clearInjectedValues(report.removedKeys)
-        problems += valueProblems
+        let clearResult = clearInjectedValues(report.removedKeys)
+        report.pendingGuiRemovals = clearResult.failedKeys
+        problems += clearResult.problems
 
-        // 4. 脚本：它记着本工具注入过哪些 key，是清残留的唯一依据。
-        //    值没清干净时留着它——下次应用能据此重试，诊断也能据此报出残留，而不是无从查起。
+        // 4. 脚本：保留它作为历史记录与排查现场；待清理残留已在覆盖脚本前落盘，是跨重启重试的依据。
+        //    值没清干净时仍留着脚本，方便检查；下次重试也能从落盘的残留清单找回 key。
         if scriptExists {
-            if valueProblems.isEmpty {
+            if clearResult.failedKeys.isEmpty {
                 do {
                     try FileManager.default.removeItem(at: paths.guiScriptURL)
                 } catch {
                     problems.append("GUI 层脚本删除失败（\(paths.guiScriptURL.path)）：\(error.localizedDescription)")
                 }
             } else {
-                problems.append("GUI 层脚本保留（\(paths.guiScriptURL.path)）：它记着要清的变量，下次应用会重试")
+                problems.append("GUI 层脚本保留（\(paths.guiScriptURL.path)）：待清理变量已记录，下次重试会继续清除")
             }
         }
 
@@ -317,12 +364,22 @@ public final class GuiLayer: Sendable {
         return report
     }
 
-    /// 把上次注入的变量从 gui 域里清掉；返回的每一条都是没清成的说明（空 = 全清干净了）。
-    private func clearInjectedValues(_ keys: [String]) -> [String] {
-        keys.compactMap { key in
+    /// 把上次注入的变量从 gui 域里清掉；返回没清成的 key（= 待清理残留）与对应的说明。
+    private struct ClearResult {
+        var failedKeys: [String]
+        var problems: [String]
+    }
+
+    private func clearInjectedValues(_ keys: [String]) -> ClearResult {
+        var failedKeys: [String] = []
+        var problems: [String] = []
+        for key in keys {
             let outcome = runLaunchctl(["unsetenv", key])
-            return outcome.succeeded ? nil : "清除 GUI 域残留失败（launchctl unsetenv \(key)）：\(outcome.message)"
+            guard !outcome.succeeded else { continue }
+            failedKeys.append(key)
+            problems.append("清除 GUI 域残留失败（launchctl unsetenv \(key)）：\(outcome.message)")
         }
+        return ClearResult(failedKeys: failedKeys, problems: problems)
     }
 
     // MARK: - 诊断
@@ -336,7 +393,10 @@ public final class GuiLayer: Sendable {
     /// 没有启用 GUI 层的变量时，脚本 / plist / 注册反过来成了「残留」检查——
     /// 本工具的东西不该还在系统里，应用会撤掉（不变式见 `apply` 的卸载路径），
     /// 后台项开关也不再影响什么（空态下不该为此报警）。
-    public func diagnose(entries: [ManagedEntry]) -> GuiDiagnosis {
+    public func diagnose(
+        entries: [ManagedEntry],
+        pendingGuiRemovals: [String] = []
+    ) -> GuiDiagnosis {
         var checks: [GuiCheck] = []
         let enabled = SetenvScript.enabledKeys(entries: entries)
         // 当前配置要不要 GUI 层：不要的时候，「没装 agent」是正常状态，不该报警。
@@ -498,13 +558,13 @@ public final class GuiLayer: Sendable {
         }
 
         // 6. 残留：脚本此前注入过、如今已关闭，但域里还留着
-        let leftovers = leftoverKeys(entries: entries)
+        let leftovers = leftoverKeys(entries: entries, pendingGuiRemovals: pendingGuiRemovals)
         checks.append(
             leftovers.isEmpty
                 ? GuiCheck(name: GuiCheckTitle.disabledLeftovers, detail: "没有——已关闭 GUI 层的变量都不在 gui 域里", status: .ok)
                 : GuiCheck(
                     name: GuiCheckTitle.disabledLeftovers,
-                    detail: "这些变量已关闭 GUI 层，但仍留在 gui 域（应用后清除）：\(leftovers.joined(separator: "、"))",
+                    detail: "这些变量已关闭 GUI 层，仍留在 gui 域或有待清理残留（重试 GUI 同步时清除）：\(leftovers.joined(separator: "、"))",
                     status: .warning
                 )
         )
@@ -530,15 +590,17 @@ public final class GuiLayer: Sendable {
         }
     }
 
-    /// 脚本此前注入过、如今不再启用、且仍留在 gui 域里的变量。
-    private func leftoverKeys(entries: [ManagedEntry]) -> [String] {
-        let enabled = SetenvScript.enabledKeys(entries: entries)
-        let known = entries.compactMap(\.key)
-        let previous = SetenvScript.appliedKeys(in: readString(paths.guiScriptURL) ?? "")
-        return previous.filter { key in
-            known.contains(key) && !enabled.contains(key)
-                && !runLaunchctl(["getenv", key]).stdout.trimmingCharacters(in: .newlines).isEmpty
+    /// 找出脚本历史里仍存在于 gui 域的停用变量，以及落盘的待清理残留。
+    private func leftoverKeys(entries: [ManagedEntry], pendingGuiRemovals: [String]) -> [String] {
+        let context = ownershipContext(entries: entries)
+        // 脚本历史这一支要查域里还有没有值（清成功过就不报了）；待清理残留本身即「没清成」，不必再查。
+        var leftovers = context.staleScriptKeys(ownedBy: []).filter { key in
+            !runLaunchctl(["getenv", key]).stdout.trimmingCharacters(in: .newlines).isEmpty
         }
+        for key in pendingGuiRemovals where !context.enabled.contains(key) && !leftovers.contains(key) {
+            leftovers.append(key)
+        }
+        return leftovers
     }
 
     /// 跑脚本的 `--print` 分支拿期望值（不调用 launchctl）；脚本不存在或跑不起来返回 nil。

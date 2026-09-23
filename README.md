@@ -37,6 +37,7 @@ swift run envsetter adopt            # 预览收编计划（不落盘）
 swift run envsetter adopt --apply    # 执行收编并应用
 swift run envsetter restore [文件名] # 列出 / 恢复备份
 swift run envsetter gui              # 诊断 GUI 层（脚本 / LaunchAgent 文件 / 注册 / 后台项 / 注入值 / 残留）
+swift run envsetter gui --sync       # 只重跑 GUI 层：重写 setenv.sh、注册 agent、注入当前会话、清掉待清理残留
 ```
 
 ## 测试

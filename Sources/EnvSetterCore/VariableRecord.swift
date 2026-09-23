@@ -98,10 +98,29 @@ public enum ManagedEntry: Codable, Equatable, Sendable {
 public struct EnvStore: Codable, Equatable, Sendable {
     public var entries: [ManagedEntry]
     public var blockSnapshot: String?
+    /// 待清理残留（见 CONTEXT.md）：已确认由本工具拥有、但 launchd 尚未成功清除的变量。
+    public var pendingGuiRemovals: [String]
 
-    public init(entries: [ManagedEntry] = [], blockSnapshot: String? = nil) {
+    public init(
+        entries: [ManagedEntry] = [],
+        blockSnapshot: String? = nil,
+        pendingGuiRemovals: [String] = []
+    ) {
         self.entries = entries
         self.blockSnapshot = blockSnapshot
+        self.pendingGuiRemovals = pendingGuiRemovals
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case entries, blockSnapshot, pendingGuiRemovals
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try container.decode([ManagedEntry].self, forKey: .entries)
+        blockSnapshot = try container.decodeIfPresent(String.self, forKey: .blockSnapshot)
+        // store.json 由旧版创建时没有这个字段。
+        pendingGuiRemovals = try container.decodeIfPresent([String].self, forKey: .pendingGuiRemovals) ?? []
     }
 }
 

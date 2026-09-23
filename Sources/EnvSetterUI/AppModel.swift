@@ -24,10 +24,12 @@ public final class AppModel: ObservableObject {
         public let id = UUID()
         public var kind: Kind
         public var text: String
+        public var opensDiagnostics: Bool
 
-        public init(kind: Kind, text: String) {
+        public init(kind: Kind, text: String, opensDiagnostics: Bool = false) {
             self.kind = kind
             self.text = text
+            self.opensDiagnostics = opensDiagnostics
         }
     }
 
@@ -176,6 +178,22 @@ public final class AppModel: ObservableObject {
     /// 有校验问题或有未应用改动时才能应用；忙碌时挡住重入。
     public var canApply: Bool {
         !isBusy && !changes.isEmpty && validationIssues.isEmpty
+    }
+
+    public var canRetryGuiSync: Bool {
+        !isBusy && changes.isEmpty && engine.gui != nil
+    }
+
+    /// 有草稿时唯一的出路，措辞只此一份：横幅、按钮提示、诊断面板都取它。
+    private var draftAdvice: String { "先应用，或重新载入并丢弃草稿" }
+
+    /// 诊断面板里的提示：与挡住「重试 GUI 同步」时的横幅同一句话。
+    public var draftBlockedNotice: String { draftBlockedMessage("重试 GUI 同步") }
+
+    public var guiRetryHelp: String {
+        if !changes.isEmpty { return "\(draftAdvice)，再重试 GUI 同步" }
+        if isBusy { return "当前操作完成后才能重试 GUI 同步" }
+        return "只同步已应用的 GUI 层状态，不改写 ~/.zprofile 或创建备份"
     }
 
     public var selectedRecord: VariableRecord? {
@@ -529,6 +547,7 @@ public final class AppModel: ObservableObject {
     // MARK: - 收编
 
     public func planAdoption() async {
+        if refuseWhileDraftPending("打开收编计划") { return }
         isBusy = true
         busyLabel = "扫描块外 export 行…"
         defer {
@@ -538,6 +557,8 @@ public final class AppModel: ObservableObject {
         let engine = self.engine
         do {
             let plan = try await offMain { try engine.planAdoption() }
+            // 扫描期间用户可能又改了草稿：计划是从磁盘状态生成的，落进草稿会把改动顶掉。
+            if refuseWhileDraftPending("打开收编计划") { return }
             guard !plan.adoptedKeys.isEmpty || plan.mergedPathLineCount > 0 || !plan.outsideEdits.isEmpty else {
                 banner = Banner(kind: .info, text: "没有可收编的块外 export 行。")
                 return
@@ -551,6 +572,12 @@ public final class AppModel: ObservableObject {
 
     public func confirmAdoption() async {
         guard let plan = adoptionPlan else { return }
+        // 计划是打开面板时生成的：期间新增的草稿不能被它顶掉，所以确认时再挡一次。
+        if refuseWhileDraftPending("确认收编计划") {
+            sheet = nil
+            adoptionPlan = nil
+            return
+        }
         sheet = nil
         adoptionPlan = nil
         isBusy = true
@@ -643,6 +670,32 @@ public final class AppModel: ObservableObject {
             }
             self.diagnosis = diagnosis
             sheet = .diagnostics
+        } catch {
+            dialog = EngineErrorMessages.dialog(for: error)
+        }
+    }
+
+    /// 使用已应用状态单独重试 GUI 同步；有草稿时拒绝执行，避免把草稿误当成已应用配置。
+    public func retryGuiSync() async {
+        if refuseWhileDraftPending("重试 GUI 同步") { return }
+        guard engine.gui != nil else {
+            banner = Banner(kind: .warning, text: "引擎未接入 GUI 层，无法重试同步。")
+            return
+        }
+        isBusy = true
+        busyLabel = "重试 GUI 同步…"
+        defer {
+            isBusy = false
+            busyLabel = nil
+        }
+        let engine = self.engine
+        do {
+            guard let report = try await offMain({ try engine.retryGuiSync() }) else {
+                banner = Banner(kind: .warning, text: "引擎未接入 GUI 层，无法重试同步。")
+                return
+            }
+            diagnosis = try await offMain { try engine.guiDiagnosis() }
+            banner = guiRetryBanner(report)
         } catch {
             dialog = EngineErrorMessages.dialog(for: error)
         }
@@ -756,6 +809,18 @@ public final class AppModel: ObservableObject {
         return nil
     }
 
+    /// 挡住一个需要「已应用状态」的动作，并把唯一的出路说清楚。
+    /// 返回 true = 已挡下（调用方直接 return）；没有草稿时不产生任何副作用。
+    private func refuseWhileDraftPending(_ action: String) -> Bool {
+        guard !changes.isEmpty else { return false }
+        banner = Banner(kind: .warning, text: draftBlockedMessage(action))
+        return true
+    }
+
+    private func draftBlockedMessage(_ action: String) -> String {
+        "当前有 \(changes.count) 处待生效改动，\(draftAdvice)，再\(action)。"
+    }
+
     private func applyBanner(_ result: ApplyResult) -> Banner {
         // 「只影响之后新启动的 App」这句每次应用后都要出现——它是这个工具最容易误解的地方。
         let effect = "只影响之后新启动的 App——已运行的 App 需退出重开（侧栏「重启指定 App」）。"
@@ -797,8 +862,10 @@ public final class AppModel: ObservableObject {
                 text: """
                     shell 层已写入（\(zprofileLabel)，应用前已自动备份），但 GUI 层没做完：
                     \(gui.warning ?? "见「诊断 LaunchAgent」")
+                    可打开诊断面板单独重试 GUI 同步。
                     \(effect)
-                    """
+                    """,
+                opensDiagnostics: true
             )
         }
     }
@@ -818,7 +885,28 @@ public final class AppModel: ObservableObject {
         if let gui = result.gui, let warning = gui.warning {
             text += "\nGUI 层未完成：\(warning)"
         }
-        return Banner(kind: result.gui?.warning == nil ? .info : .warning, text: text)
+        return Banner(
+            kind: result.gui?.warning == nil ? .info : .warning,
+            text: result.gui?.warning == nil ? text : text + "\n可打开诊断面板单独重试 GUI 同步。",
+            opensDiagnostics: result.gui?.warning != nil
+        )
+    }
+
+    private func guiRetryBanner(_ report: GuiApplyReport) -> Banner {
+        switch report.outcome {
+        case .applied:
+            return Banner(kind: .info, text: "GUI 层同步成功，已刷新诊断结果。")
+        case .uninstalled:
+            return Banner(kind: .info, text: "GUI 层清理完成，已刷新诊断结果。")
+        case .skipped:
+            return Banner(kind: .info, text: "当前没有需要同步的 GUI 层变量，已刷新诊断结果。")
+        case .partial, .failed:
+            return Banner(
+                kind: .warning,
+                text: "GUI 层仍未完成：\(report.warning ?? "请查看诊断结果。")\n可在诊断面板再次重试 GUI 同步。",
+                opensDiagnostics: true
+            )
+        }
     }
 
 }

@@ -83,6 +83,103 @@ struct AdoptionScannerTests {
         #expect(records.first?.rawValue == "newer")
     }
 
+    @Test func sameNameExportsRespectTheirPositionAroundTheMarkerBlock() throws {
+        let existing: [ManagedEntry] = [
+            .record(VariableRecord(key: "A", rawValue: "inside", source: .toolCreated)),
+        ]
+        let block = MarkerBlock.generate(entries: existing)
+
+        let beforePlan = try AdoptionScanner.plan(
+            fileContent: "export A=\"before\"\n\(block)\n",
+            currentEntries: existing
+        )
+        let beforeValue = beforePlan.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let record) = entry, record.key == "A" { return record }
+            return nil
+        }.first?.rawValue
+        #expect(beforeValue == "inside")
+
+        let afterPlan = try AdoptionScanner.plan(
+            fileContent: "\(block)\nexport A=\"after\"\n",
+            currentEntries: existing
+        )
+        let afterValue = afterPlan.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let record) = entry, record.key == "A" { return record }
+            return nil
+        }.first?.rawValue
+        #expect(afterValue == "after")
+    }
+
+    /// 块内只有一行看不懂的内容可能给 A 赋值时，工具不猜谁最后生效：
+    /// 块外那条同名 export 原样留着（不注释、不收编），计划里报「跳过」。
+    @Test func doesNotGuessWhenOnlyAnUnreadableBlockLineMayAssignTheKey() throws {
+        let unreadable = "export A=1 B=2"
+        let entries: [ManagedEntry] = [.verbatim(line: unreadable)]
+        let block = MarkerBlock.generate(entries: entries)
+        let content = "export A=\"before\"\n\(block)\n"
+
+        let plan = try AdoptionScanner.plan(fileContent: content, currentEntries: entries)
+
+        #expect(plan.adoptedKeys.isEmpty)
+        #expect(plan.outsideEdits.isEmpty, "块外那行必须保持原样，不能被注释掉")
+        #expect(plan.skipped.count == 1)
+        #expect(plan.skipped.first?.line == #"export A="before""#)
+        #expect(plan.skipped.first?.reason.contains("A") == true)
+        // 块内容逐字不变：没有多出一条 `export A=`，A 的生效值仍是块内那行的
+        #expect(MarkerBlock.generate(entries: plan.entries) == block)
+    }
+
+    /// 同名 key 已经是工具记录（shell 层关着）时同样不猜：记录的值不取块外那条，原行也不注释。
+    @Test func doesNotGuessForAnExistingRecordEither() throws {
+        let entries: [ManagedEntry] = [
+            .verbatim(line: "export A=1 B=2"),
+            .record(VariableRecord(key: "A", rawValue: "latent", shellEnabled: false)),
+        ]
+        let content = "export A=\"before\"\n\(MarkerBlock.generate(entries: entries))\n"
+
+        let plan = try AdoptionScanner.plan(fileContent: content, currentEntries: entries)
+
+        let record = plan.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let r) = entry, r.key == "A" { return r }
+            return nil
+        }.first
+        #expect(record?.rawValue == "latent")
+        #expect(plan.outsideEdits.isEmpty)
+        #expect(plan.skipped.count == 1)
+    }
+
+    /// 假命中也要按「不猜」处理：`A=` 出现在看不懂那行的字符串里也算「可能赋值」。
+    /// 宁可少收编一条（有提示），也不悄悄改生效值——这条规则刻意选偏保守的一侧。
+    @Test func treatsAKeyMentionedInsideAnUnreadableLineAsUncertain() throws {
+        let unreadable = #"echo "A=1" >> "$HOME/notes""#
+        let entries: [ManagedEntry] = [.verbatim(line: unreadable)]
+        let content = "export A=\"before\"\n\(MarkerBlock.generate(entries: entries))\n"
+
+        let plan = try AdoptionScanner.plan(fileContent: content, currentEntries: entries)
+
+        #expect(plan.adoptedKeys.isEmpty)
+        #expect(plan.outsideEdits.isEmpty)
+        #expect(plan.skipped.count == 1)
+    }
+
+    /// 不猜只管块前那条：块后的同名 export 仍是最后一次赋值，照旧收编。
+    @Test func afterBlockExportStillWinsEvenWhenTheBlockIsUnreadable() throws {
+        let entries: [ManagedEntry] = [.verbatim(line: "export A=1 B=2")]
+        let block = MarkerBlock.generate(entries: entries)
+        let content = "\(block)\nexport A=\"after\"\n"
+
+        let plan = try AdoptionScanner.plan(fileContent: content, currentEntries: entries)
+
+        #expect(plan.adoptedKeys == ["A"])
+        #expect(plan.outsideEdits.count == 1)
+        #expect(plan.skipped.isEmpty)
+        let record = plan.entries.compactMap { entry -> VariableRecord? in
+            if case .record(let r) = entry, r.key == "A" { return r }
+            return nil
+        }.first
+        #expect(record?.rawValue == "after")
+    }
+
     @Test func withExistingBlockAppendsAdoptedAndMovesPathToEnd() throws {
         let existing: [ManagedEntry] = [
             .record(VariableRecord(key: "A", rawValue: "1", source: .toolCreated)),

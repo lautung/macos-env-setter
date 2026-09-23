@@ -771,6 +771,42 @@ struct AppModelTests {
         #expect(harness.model.banner?.text.contains("收编") == true)
     }
 
+    @Test func adoptionIsBlockedWhenThereIsAnUnappliedDraft() async throws {
+        let harness = try Harness()
+        try harness.writeProfile("export OUTSIDE=\"1\"\n")
+        await harness.model.start()
+        harness.model.addRecord(key: "DRAFT", rawValue: "keep", shellEnabled: true, guiEnabled: false, secret: false)
+        let draft = harness.model.entries
+
+        await harness.model.planAdoption()
+
+        #expect(harness.model.sheet == nil)
+        #expect(harness.model.adoptionPlan == nil)
+        #expect(harness.model.entries == draft)
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.banner?.text.contains("待生效改动") == true)
+        #expect(try harness.profileContent == "export OUTSIDE=\"1\"\n")
+    }
+
+    @Test func confirmAdoptionDoesNotReplaceDraftsAddedAfterPlanning() async throws {
+        let harness = try Harness()
+        try harness.writeProfile("export OUTSIDE=\"1\"\n")
+        await harness.model.start()
+        await harness.model.planAdoption()
+        #expect(harness.model.sheet == .adoption)
+
+        harness.model.addRecord(key: "DRAFT", rawValue: "keep", shellEnabled: true, guiEnabled: false, secret: false)
+        let draft = harness.model.entries
+        await harness.model.confirmAdoption()
+
+        #expect(harness.model.sheet == nil)
+        #expect(harness.model.adoptionPlan == nil)
+        #expect(harness.model.entries == draft)
+        #expect(harness.model.pendingCount == 1)
+        #expect(harness.model.banner?.text.contains("待生效改动") == true)
+        #expect(try harness.profileContent == "export OUTSIDE=\"1\"\n")
+    }
+
     @Test func adoptionWithNothingToAdoptJustSaysSo() async throws {
         let harness = try Harness()
         await harness.model.start()
@@ -819,6 +855,73 @@ struct AppModelTests {
         let diagnosis = try #require(harness.model.diagnosis)
         // 界面拿到的就是清单那六行、那个顺序（标题是行身份，`List` 以它作 `id`）
         #expect(diagnosis.checks.map(\.name) == GuiCheckTitle.checklist)
+    }
+
+    @Test func guiSyncRetryRefreshesDiagnosisAndDoesNotTouchShellOrBackups() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        let script = harness.paths.guiScriptURL.path
+        harness.runner.outcomes[[LaunchAgent.shellPath, script, SetenvScript.printFlag]] = ProcessOutcome(
+            exitCode: 0, stdout: "FOO=1\n", stderr: ""
+        )
+        harness.runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "FOO"]] = ProcessOutcome(
+            exitCode: 0, stdout: "stale\n", stderr: ""
+        )
+        harness.model.addRecord(key: "FOO", rawValue: "1", shellEnabled: true, guiEnabled: true, secret: false)
+        await harness.model.apply()
+        await harness.model.openDiagnostics()
+        let injectedCheck = try #require(
+            harness.model.diagnosis?.checks.first { $0.name == GuiCheckTitle.injectedValues }
+        )
+        #expect(injectedCheck.status == .failed)
+
+        let profileBeforeRetry = try harness.profileContent
+        let backupsBeforeRetry = try harness.engine.backupsList().count
+        harness.runner.outcomes[[LaunchAgent.shellPath, script]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "script failed"
+        )
+        await harness.model.retryGuiSync()
+        #expect(harness.model.banner?.kind == .warning)
+        #expect(harness.model.banner?.opensDiagnostics == true)
+
+        harness.runner.outcomes[[LaunchAgent.shellPath, script]] = ProcessOutcome(
+            exitCode: 0, stdout: "", stderr: ""
+        )
+        harness.runner.outcomes[[LaunchAgent.launchctlPath, "getenv", "FOO"]] = ProcessOutcome(
+            exitCode: 0, stdout: "1\n", stderr: ""
+        )
+        await harness.model.retryGuiSync()
+
+        #expect(harness.model.banner?.kind == .info)
+        #expect(harness.model.banner?.text.contains("已刷新诊断") == true)
+        #expect(harness.model.diagnosis?.checks.first { $0.name == GuiCheckTitle.injectedValues }?.status == .ok)
+        #expect(try harness.profileContent == profileBeforeRetry)
+        #expect(try harness.engine.backupsList().count == backupsBeforeRetry)
+
+        harness.model.setRawValue("draft", for: "FOO")
+        #expect(!harness.model.canRetryGuiSync)
+        #expect(harness.model.guiRetryHelp.contains("先应用"))
+    }
+
+    /// 漂移之后单独重试 GUI 层：和显式应用一样被拒绝，并把「重新载入」这条路指出来。
+    @Test func guiSyncRetryIsRefusedAfterDriftAndOffersReload() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("FOO", "1", gui: true)
+
+        let profile = try harness.profileContent
+        try harness.writeProfile(
+            profile.replacingOccurrences(of: "export FOO=\"1\"", with: "export FOO=\"2\"")
+        )
+        harness.model.banner = nil
+
+        await harness.model.retryGuiSync()
+
+        // 拒绝的理由走弹窗（和显式应用同一条路），不拿横幅糊过去
+        let dialog = try #require(harness.model.dialog)
+        #expect(dialog.action == .reloadFromDisk)
+        #expect(dialog.title.contains("手工改动"))
+        #expect(harness.model.banner == nil)
     }
 
     @Test func diagnosticsWithoutGuiLayerWarns() async throws {

@@ -16,7 +16,7 @@ func printUsage() {
           restore           列出备份
           restore <文件名>  恢复指定备份
           gui               诊断 GUI 层（脚本 / LaunchAgent 文件 / 注册 / 后台项 / 注入值 / 残留）
-          gui --sync        只重跑 GUI 层：重写 setenv.sh、注册 LaunchAgent、立即注入当前会话
+          gui --sync        只重跑 GUI 层：重写 setenv.sh、注册 LaunchAgent、立即注入当前会话、清掉待清理残留
         """
     )
 }
@@ -145,23 +145,32 @@ func describeGui(_ report: GuiApplyReport?) {
     // 没有 GUI 层变量时走的是卸载路径（`keys` 为空）：下面几行说的都是「装了没有」，卸载下没有意义。
     guard !report.keys.isEmpty else {
         if let warning = report.warning { print("  ⚠️  \(warning)") }
-        if !report.removedKeys.isEmpty {
-            print("  已清除残留：\(report.removedKeys.joined(separator: "、"))")
-        }
+        describeLeftovers(report)
         return
     }
     let scriptNote = report.scriptWritten ? "已写入" : "未写入"
     print("  脚本：\(report.scriptURL.path)（\(scriptNote)，\(report.keys.count) 个变量）")
     if !report.keys.isEmpty { print("        变量：\(report.keys.joined(separator: "、"))") }
-    if !report.removedKeys.isEmpty {
-        print("  已清除残留：\(report.removedKeys.joined(separator: "、"))")
-    }
+    describeLeftovers(report)
     print("  LaunchAgent：\(report.agentRegistered ? "已注册" : "未注册")\(report.agentInstalled ? "（本次写入 plist）" : "")")
     print("  立即注入当前会话：\(report.liveSynced ? "成功" : "失败")")
     for mismatch in report.mismatches {
         print("  ⚠️  回读不一致 · \(mismatch.key)：域里 \(mismatch.actual ?? "（不存在）")，脚本算的是 \(mismatch.expected)")
     }
     if let warning = report.warning { print("  ⚠️  \(warning)") }
+}
+
+/// 残留分两句说：`removedKeys` 是本次**尝试**清除的 key，没清成的在 `pendingGuiRemovals`——
+/// 失败也照旧打印「已清除」会自相矛盾（上一行刚说过 unsetenv 失败）。
+func describeLeftovers(_ report: GuiApplyReport) {
+    let pending = Set(report.pendingGuiRemovals)
+    let cleared = report.removedKeys.filter { !pending.contains($0) }
+    if !cleared.isEmpty {
+        print("  已清除残留：\(cleared.joined(separator: "、"))")
+    }
+    if !pending.isEmpty {
+        print("  待清理残留（本次没清成，重试会继续）：\(pending.sorted().joined(separator: "、"))")
+    }
 }
 
 func checkMark(_ status: GuiCheckStatus) -> String {
@@ -178,8 +187,14 @@ func gui(_ engine: EnvSetterEngine, sync: Bool) {
         return
     }
     if sync {
-        guard let entries = loadAndReportDrift(engine) else { return }
-        describeGui(layer.apply(entries: entries))
+        // 先按文件校准状态（漂移在这里报出来），再走引擎的 GUI 同步入口：
+        // 它带着持久化的待清理残留，清失败的 key 不会因为脚本被重写而丢掉。
+        guard loadAndReportDrift(engine) != nil else { return }
+        do {
+            describeGui(try engine.retryGuiSync())
+        } catch {
+            print("❌ GUI 层同步被拒绝：\(error)")
+        }
         return
     }
     do {

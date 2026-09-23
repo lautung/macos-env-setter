@@ -450,8 +450,9 @@ struct GuiLayerTests {
         #expect(report.warning == nil)
     }
 
-    /// 值没清干净时留着脚本：它是「注入过哪些 key」的唯一依据——
+    /// 值没清干净时留着脚本：独立使用 GUI 层时，它是「注入过哪些 key」的唯一线索——
     /// 下次应用据此重试清理，诊断据此报出残留，而不是无从查起。
+    /// （引擎接上本地状态后，跨重启的依据是落盘的待清理残留，见 `EngineTests`。）
     @Test func uninstallKeepsTheScriptWhenDomainValuesCouldNotBeCleared() throws {
         let (home, paths) = try TestSupport.makeSandbox()
         let runner = FakeProcessRunner()
