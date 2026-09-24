@@ -845,9 +845,9 @@ public final class AppModel: ObservableObject {
                 text: "已应用：\(zprofileLabel) 标记块与本地状态已写入（应用前已自动备份）。当前没有启用 GUI 层的变量，未安装 LaunchAgent。\(effect)"
             )
         case .uninstalled:
-            let cleared = gui.removedKeys.isEmpty
+            let cleared = gui.clearedKeys.isEmpty
                 ? ""
-                : "，并从 gui 域清除了 \(gui.removedKeys.count) 个变量（\(gui.removedKeys.joined(separator: "、"))）"
+                : "，并从 gui 域清除了 \(gui.clearedKeys.count) 个变量（\(gui.clearedKeys.joined(separator: "、"))）"
             return Banner(
                 kind: .info,
                 text: """
@@ -857,10 +857,14 @@ public final class AppModel: ObservableObject {
                     """
             )
         case .partial, .failed:
+            let cleared = gui.clearedKeys.isEmpty
+                ? ""
+                : "本轮已从 gui 域清除 \(gui.clearedKeys.count) 个变量（\(gui.clearedKeys.joined(separator: "、"))）。\n"
             return Banner(
                 kind: .warning,
                 text: """
                     shell 层已写入（\(zprofileLabel)，应用前已自动备份），但 GUI 层没做完：
+                    \(cleared)\
                     \(gui.warning ?? "见「诊断 LaunchAgent」")
                     可打开诊断面板单独重试 GUI 同步。
                     \(effect)

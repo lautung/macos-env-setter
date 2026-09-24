@@ -122,7 +122,7 @@ struct LaunchdLiveTests {
             VariableRecord(key: "ENVSETTER_ACCEPT_JAVA_HOME", rawValue: "$ENVSETTER_ACCEPT_TOOLS/jdk", guiEnabled: false)
         )
         let second = layer.apply(entries: trimmed)
-        #expect(second.removedKeys == ["ENVSETTER_ACCEPT_JAVA_HOME"])
+        #expect(second.removalCandidates == ["ENVSETTER_ACCEPT_JAVA_HOME"])
         #expect(second.outcome == .applied, "\(second.warning ?? "")")
         #expect(getenv("ENVSETTER_ACCEPT_JAVA_HOME") == nil)
 

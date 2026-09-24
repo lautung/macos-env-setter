@@ -990,6 +990,26 @@ struct AppModelTests {
         #expect(banner.text.contains("只影响之后新启动的 App"))
     }
 
+    @Test func partialGuiCleanupBannerListsClearedKeysAlongsideFailureDetails() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("A", "1", shell: false, gui: true)
+        await harness.addApplied("B", "2", shell: false, gui: true)
+        await harness.addApplied("C", "3", shell: false, gui: true)
+        harness.runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+        harness.model.setLayer(.gui, enabled: false, for: "A")
+        harness.model.setLayer(.gui, enabled: false, for: "B")
+
+        await harness.model.apply()
+
+        let banner = try #require(harness.model.banner)
+        #expect(banner.kind == .warning)
+        #expect(banner.text.contains("本轮已从 gui 域清除 1 个变量（B）"))
+        #expect(banner.text.contains("launchctl unsetenv A"))
+    }
+
     // MARK: - 忙碌状态
 
     @Test func commandsAreBlockedWhileBusy() async throws {

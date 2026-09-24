@@ -224,7 +224,10 @@ struct EngineTests {
         let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
         let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
         let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
-        _ = try engine.apply(entries: [a, b])
+        let initial = try engine.apply(entries: [a, b])
+        #expect(initial.gui?.removalCandidates.isEmpty == true)
+        #expect(initial.gui?.clearedKeys.isEmpty == true)
+        #expect(initial.gui?.pendingGuiRemovals.isEmpty == true)
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"]))
 
         // 手工往工具自己的脚本里塞一行外来 key：它不在任何记录里，不该被清
@@ -239,7 +242,11 @@ struct EngineTests {
 
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"]))
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "FOREIGN"]))
+        #expect(result.gui?.removalCandidates == ["B"])
+        #expect(result.gui?.clearedKeys == ["B"])
+        #expect(result.gui?.pendingGuiRemovals.isEmpty == true)
         #expect(result.gui?.removedKeys == ["B"])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
 
         // 再应用一次：脚本里已经没有 B 了，不该重复清
         let callsBefore = runner.calls.count
@@ -265,6 +272,8 @@ struct EngineTests {
         )
 
         let removed = try firstEngine.apply(entries: [])
+        #expect(removed.gui?.removalCandidates == ["A"])
+        #expect(removed.gui?.clearedKeys.isEmpty == true)
         #expect(removed.gui?.pendingGuiRemovals == ["A"])
         #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
         let leftover = try #require(
@@ -278,10 +287,34 @@ struct EngineTests {
             exitCode: 0, stdout: "", stderr: ""
         )
         let retry = try #require(try makeGuiEngine(home: home, paths: paths, runner: runner).retryGuiSync())
+        #expect(retry.removalCandidates == ["A"])
+        #expect(retry.clearedKeys == ["A"])
         #expect(retry.pendingGuiRemovals.isEmpty)
         #expect(retry.outcome == .uninstalled)
         #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
+    }
+
+    @Test func guiRemovalReportSeparatesSuccessfulAndFailedKeys() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        stubUnregistered(runner)
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
+        let c = ManagedEntry.record(VariableRecord(key: "C", rawValue: "3", guiEnabled: true))
+        _ = try engine.apply(entries: [a, b, c])
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+
+        let result = try engine.apply(entries: [c])
+        let report = try #require(result.gui)
+
+        #expect(report.removalCandidates == ["A", "B"])
+        #expect(report.clearedKeys == ["B"])
+        #expect(report.pendingGuiRemovals == ["A"])
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
     }
 
     /// 审查发现的原始形态：**其他 GUI 变量还在**时，脚本会被重写成不含 A——旧脚本从此给不出线索，
@@ -305,7 +338,8 @@ struct EngineTests {
         let removed = try engine.apply(entries: [b])
 
         #expect(removed.gui?.outcome == .partial)
-        #expect(removed.gui?.removedKeys == ["A"])
+        #expect(removed.gui?.removalCandidates == ["A"])
+        #expect(removed.gui?.clearedKeys.isEmpty == true)
         #expect(removed.gui?.pendingGuiRemovals == ["A"])
         #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
         // B 还在，所以脚本被重写成只剩 B：A 的 key 从脚本里消失，旧脚本再也提供不了线索
@@ -338,6 +372,8 @@ struct EngineTests {
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBeforeSuccess))
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"], since: callsBeforeSuccess))
         #expect(retry.pendingGuiRemovals.isEmpty)
+        #expect(retry.removalCandidates == ["A"])
+        #expect(retry.clearedKeys == ["A"])
         #expect(retry.outcome == .applied)
         #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
         #expect(try TestSupport.read(paths.guiScriptURL).contains("B="))
@@ -359,6 +395,8 @@ struct EngineTests {
         let callsBeforeReenable = runner.calls.count
         let reenabled = try engine.apply(entries: [a])
 
+        #expect(reenabled.gui?.removalCandidates.isEmpty == true)
+        #expect(reenabled.gui?.clearedKeys.isEmpty == true)
         #expect(reenabled.gui?.pendingGuiRemovals.isEmpty == true)
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBeforeReenable))
         #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals.isEmpty)
@@ -505,6 +543,43 @@ struct EngineTests {
         // 本地状态也照常保存
         let store = try StorePersistence.load(from: paths.storeURL)
         #expect(store.entries == [.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))])
+    }
+
+    @Test func guiScriptWriteFailureLeavesRemovalCandidatePendingWithoutAttemptingCleanup() throws {
+        let (home, paths) = try TestSupport.makeSandbox()
+        let runner = FakeProcessRunner()
+        let engine = makeGuiEngine(home: home, paths: paths, runner: runner)
+        let a = ManagedEntry.record(VariableRecord(key: "A", rawValue: "1", guiEnabled: true))
+        let b = ManagedEntry.record(VariableRecord(key: "B", rawValue: "2", guiEnabled: true))
+        _ = try engine.apply(entries: [a, b])
+
+        runner.outcomes[[LaunchAgent.launchctlPath, "unsetenv", "A"]] = ProcessOutcome(
+            exitCode: 1, stdout: "", stderr: "Unsetenv failed"
+        )
+        _ = try engine.apply(entries: [b])
+
+        // 待清理残留已持久化后，改用不可写的脚本路径；状态文件仍保留在原目录。
+        let blocked = home.appending(path: "blocked")
+        try TestSupport.write("not a directory", to: blocked)
+        let brokenPaths = EnginePaths(
+            zprofileURL: paths.zprofileURL,
+            storeURL: paths.storeURL,
+            backupsDirectory: paths.backupsDirectory,
+            launchAgentsDirectory: paths.launchAgentsDirectory,
+            guiScriptURL: blocked.appending(path: "setenv.sh")
+        )
+        let brokenEngine = makeGuiEngine(home: home, paths: brokenPaths, runner: runner)
+        let callsBefore = runner.calls.count
+
+        let result = try brokenEngine.apply(entries: [b])
+        let report = try #require(result.gui)
+
+        #expect(report.outcome == .failed)
+        #expect(report.removalCandidates == ["A"])
+        #expect(report.clearedKeys.isEmpty)
+        #expect(report.pendingGuiRemovals == ["A"])
+        #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"], since: callsBefore))
+        #expect(try StorePersistence.load(from: paths.storeURL).pendingGuiRemovals == ["A"])
     }
 
     @Test func atomicWriteFollowsSymlinkInsteadOfReplacingIt() throws {

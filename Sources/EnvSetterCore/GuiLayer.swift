@@ -34,8 +34,10 @@ public struct GuiApplyReport: Equatable, Sendable {
     public var scriptURL: URL
     /// 本次写入脚本的变量（声明顺序）。
     public var keys: [String]
-    /// 本次**尝试**从 gui 域清除的变量（此前由本工具写入、如今不再启用）；没清成的见 `pendingGuiRemovals`。
-    public var removedKeys: [String]
+    /// 需要从 gui 域清除的变量（此前由本工具写入、如今不再启用）；不代表本轮已尝试移除。
+    public var removalCandidates: [String]
+    /// 本轮 `launchctl unsetenv` 成功返回、已从 GUI 层移除的候选变量。
+    public var clearedKeys: [String]
     /// 本次仍未清除的待清理残留（见 CONTEXT.md）；引擎据此更新本地状态，供下次重试。
     public var pendingGuiRemovals: [String]
     public var scriptWritten: Bool
@@ -48,6 +50,13 @@ public struct GuiApplyReport: Equatable, Sendable {
     public var warning: String?
 
     public var isFullyApplied: Bool { outcome == .applied }
+
+    /// 保留兼容入口；过去的字段实际表示移除候选项，并非已清除项。
+    @available(*, deprecated, renamed: "removalCandidates")
+    public var removedKeys: [String] {
+        get { removalCandidates }
+        set { removalCandidates = newValue }
+    }
 }
 
 public enum GuiCheckStatus: String, Equatable, Sendable {
@@ -220,7 +229,8 @@ public final class GuiLayer: Sendable {
             outcome: .skipped,
             scriptURL: paths.guiScriptURL,
             keys: enabled,
-            removedKeys: removals,
+            removalCandidates: removals,
+            clearedKeys: [],
             pendingGuiRemovals: removals,
             scriptWritten: false,
             agentInstalled: false,
@@ -287,6 +297,7 @@ public final class GuiLayer: Sendable {
             problems.append("把变量注入当前会话失败：\(injected.message)")
         }
         let clearResult = clearInjectedValues(removals)
+        report.clearedKeys = clearResult.clearedKeys
         report.pendingGuiRemovals = clearResult.failedKeys
         problems += clearResult.problems
 
@@ -310,14 +321,14 @@ public final class GuiLayer: Sendable {
     /// 卸载：没有启用 GUI 层的变量时，把上次装下的脚本、plist 与注册一并撤掉。
     ///
     /// 本来就没装过（纯 shell 层用户、或刚撤干净）、也没有待清理残留时，只查一次注册，什么都不动，`skipped` 原样返回。
-    /// 已关闭变量的残留（`removedKeys`）照旧只清本工具写过的 key：launchd 没有标记块那样的隔离区。
+    /// 已关闭变量的残留（`removalCandidates`）照旧只清本工具写过的 key：launchd 没有标记块那样的隔离区。
     private func uninstall(_ report: GuiApplyReport) -> GuiApplyReport {
         var report = report
         let scriptExists = FileManager.default.fileExists(atPath: paths.guiScriptURL.path)
         let plistExists = FileManager.default.fileExists(atPath: plistURL.path)
         let wasRegistered = isRegistered()
         // 注册也要算：文件被手工删过而 agent 还挂着时，只有注册能说明「这里还有本工具的东西」。
-        guard scriptExists || plistExists || wasRegistered || !report.removedKeys.isEmpty else { return report }
+        guard scriptExists || plistExists || wasRegistered || !report.removalCandidates.isEmpty else { return report }
 
         var problems: [String] = []
 
@@ -341,7 +352,8 @@ public final class GuiLayer: Sendable {
         }
 
         // 3. gui 域里的值：只清本工具写过的 key
-        let clearResult = clearInjectedValues(report.removedKeys)
+        let clearResult = clearInjectedValues(report.removalCandidates)
+        report.clearedKeys = clearResult.clearedKeys
         report.pendingGuiRemovals = clearResult.failedKeys
         problems += clearResult.problems
 
@@ -366,20 +378,25 @@ public final class GuiLayer: Sendable {
 
     /// 把上次注入的变量从 gui 域里清掉；返回没清成的 key（= 待清理残留）与对应的说明。
     private struct ClearResult {
+        var clearedKeys: [String]
         var failedKeys: [String]
         var problems: [String]
     }
 
     private func clearInjectedValues(_ keys: [String]) -> ClearResult {
+        var clearedKeys: [String] = []
         var failedKeys: [String] = []
         var problems: [String] = []
         for key in keys {
             let outcome = runLaunchctl(["unsetenv", key])
-            guard !outcome.succeeded else { continue }
+            if outcome.succeeded {
+                clearedKeys.append(key)
+                continue
+            }
             failedKeys.append(key)
             problems.append("清除 GUI 域残留失败（launchctl unsetenv \(key)）：\(outcome.message)")
         }
-        return ClearResult(failedKeys: failedKeys, problems: problems)
+        return ClearResult(clearedKeys: clearedKeys, failedKeys: failedKeys, problems: problems)
     }
 
     // MARK: - 诊断

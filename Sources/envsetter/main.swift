@@ -160,16 +160,13 @@ func describeGui(_ report: GuiApplyReport?) {
     if let warning = report.warning { print("  ⚠️  \(warning)") }
 }
 
-/// 残留分两句说：`removedKeys` 是本次**尝试**清除的 key，没清成的在 `pendingGuiRemovals`——
-/// 失败也照旧打印「已清除」会自相矛盾（上一行刚说过 unsetenv 失败）。
+/// 使用核心报告给出的已清除项与待清理残留，避免调用方各自推导清理状态。
 func describeLeftovers(_ report: GuiApplyReport) {
-    let pending = Set(report.pendingGuiRemovals)
-    let cleared = report.removedKeys.filter { !pending.contains($0) }
-    if !cleared.isEmpty {
-        print("  已清除残留：\(cleared.joined(separator: "、"))")
+    if !report.clearedKeys.isEmpty {
+        print("  已清除残留：\(report.clearedKeys.joined(separator: "、"))")
     }
-    if !pending.isEmpty {
-        print("  待清理残留（本次没清成，重试会继续）：\(pending.sorted().joined(separator: "、"))")
+    if !report.pendingGuiRemovals.isEmpty {
+        print("  待清理残留（本次没清成，重试会继续）：\(report.pendingGuiRemovals.joined(separator: "、"))")
     }
 }
 

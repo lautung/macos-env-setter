@@ -243,7 +243,7 @@ struct GuiLayerTests {
 
         let report = layer.apply(entries: entries)
 
-        #expect(report.removedKeys == ["B"])
+        #expect(report.removalCandidates == ["B"])
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "B"]))
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "FOREIGN"]))
         #expect(report.outcome == .applied, "\(report.warning ?? "")")
@@ -310,7 +310,7 @@ struct GuiLayerTests {
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "TOOLS"], since: callsBefore))
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "JAVA_HOME"], since: callsBefore))
         #expect(report.outcome == .uninstalled)
-        #expect(report.removedKeys == ["TOOLS", "JAVA_HOME"])
+        #expect(report.removalCandidates == ["TOOLS", "JAVA_HOME"])
         #expect(report.warning == nil)
     }
 
@@ -328,7 +328,7 @@ struct GuiLayerTests {
 
         let report = layer.apply(entries: [record("A", "1", gui: false)])
 
-        #expect(report.removedKeys == ["A"])
+        #expect(report.removalCandidates == ["A"])
         #expect(runner.called(LaunchAgent.launchctlPath, ["unsetenv", "A"]))
         #expect(!runner.called(LaunchAgent.launchctlPath, ["unsetenv", "FOREIGN"]))
         #expect(!FileManager.default.fileExists(atPath: paths.guiScriptURL.path))
