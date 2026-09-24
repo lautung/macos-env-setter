@@ -47,7 +47,7 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var entries: [ManagedEntry] = []
     /// 已应用状态（磁盘上的快照），「待生效」的判定基准。
     @Published public private(set) var savedEntries: [ManagedEntry] = []
-    @Published public private(set) var pathRows: [PathRow] = []
+    @Published private var pathDraft = PathDraft()
     @Published public var search: String = ""
     @Published public private(set) var selection: String?
     /// 当前临时显示明文的记录 key（切换选中即重新打码）。
@@ -65,9 +65,6 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var restartingPID: pid_t?
 
     private var started = false
-    /// PATH 行草稿是否已经与记录同步过。没同步过时草稿里的「空」不能当成「用户删光了」，
-    /// 否则一次越界的写回会把整条 PATH 清成空。
-    private var pathRowsLoaded = false
 
     public init(
         engine: EnvSetterEngine,
@@ -129,25 +126,16 @@ public final class AppModel: ObservableObject {
     private func adopt(_ newEntries: [ManagedEntry]) {
         entries = newEntries
         savedEntries = newEntries
-        syncPathRows()
+        syncPathDraft()
         revealedKey = nil
         if let selection, !newEntries.hasRecord(named: selection) {
             self.selection = nil
         }
     }
 
-    /// PATH 行草稿与记录原始值的同步点。
-    /// 凡不是「编辑器写回」的原始值/变量名变化（载入、收编、新建、改名、外部赋值），之后都必须调它——
-    /// 否则草稿是空的，下一次行编辑就会把整条 PATH 写成空。
-    private func syncPathRows() {
-        guard let record = pathRecord else {
-            // 没有 PATH 记录就没有行——别把空字符串解析成「一行空条目」。
-            pathRows = []
-            pathRowsLoaded = true
-            return
-        }
-        pathRows = PathEditor.rows(fromRawValue: record.rawValue)
-        pathRowsLoaded = true
+    /// PATH 行草稿与记录原始值的同步点。编辑器以外的记录变化都从权威原始值重建行。
+    private func syncPathDraft() {
+        pathDraft.synchronize(with: pathRecord?.rawValue)
     }
 
     // MARK: - 派生状态
@@ -200,6 +188,8 @@ public final class AppModel: ObservableObject {
         guard let selection else { return nil }
         return entries.record(named: selection)
     }
+
+    public var pathRows: [PathRow] { pathDraft.rows }
 
     public var pathRecord: VariableRecord? {
         entries.record(named: VariableKeys.path)
@@ -311,7 +301,7 @@ public final class AppModel: ObservableObject {
             source: .toolCreated
         )
         entries.append(.record(record))
-        if record.key == VariableKeys.path { syncPathRows() }
+        if record.key == VariableKeys.path { syncPathDraft() }
         selection = record.key
         revealedKey = nil
         banner = Banner(kind: .info, text: "已添加 \(record.key)（待生效）——点「应用」才写入两层。")
@@ -336,6 +326,7 @@ public final class AppModel: ObservableObject {
     public func deleteRecord(_ key: String) {
         let impact = removalImpact(for: key)
         entries.removeAll { $0.key == key }
+        if key == VariableKeys.path { syncPathDraft() }
         if selection == key { selection = nil }
         if revealedKey == key { revealedKey = nil }
         // 只有已应用过的记录才会留下待生效改动（其余直接消失，没什么可说的）。
@@ -355,6 +346,7 @@ public final class AppModel: ObservableObject {
         let insertAt = predecessor
             .flatMap { previous in entries.firstIndex { $0.key == previous.key }.map { $0 + 1 } } ?? 0
         entries.insert(.record(record), at: min(insertAt, entries.count))
+        if key == VariableKeys.path { syncPathDraft() }
         selection = record.key
     }
 
@@ -362,14 +354,14 @@ public final class AppModel: ObservableObject {
         guard newKey != key else { return }
         Self.mutate(&entries, key: key) { $0.key = newKey }
         // 改名进出 PATH 都要重建行草稿：记录换了身份，旧草稿从此对不上它。
-        if key == VariableKeys.path || newKey == VariableKeys.path { syncPathRows() }
+        if key == VariableKeys.path || newKey == VariableKeys.path { syncPathDraft() }
         if selection == key { selection = newKey }
         if revealedKey == key { revealedKey = newKey }
     }
 
     public func setRawValue(_ value: String, for key: String) {
         Self.mutate(&entries, key: key) { $0.rawValue = value }
-        if key == VariableKeys.path { syncPathRows() }
+        if key == VariableKeys.path { syncPathDraft() }
     }
 
     public func setLayer(_ layer: Layer, enabled: Bool, for key: String) {
@@ -411,12 +403,12 @@ public final class AppModel: ObservableObject {
 
     // MARK: - PATH 编辑器
 
-    public var pathDuplicateIDs: Set<UUID> { PathEditor.duplicateIDs(pathRows) }
+    public var pathDuplicateIDs: Set<UUID> { pathDraft.duplicateIDs }
 
-    public var pathHasAnchor: Bool { PathEditor.anchorCount(pathRows) > 0 }
+    public var pathHasAnchor: Bool { pathDraft.anchorCount > 0 }
 
     public var pathAnchorWarning: String? {
-        PathEditor.anchorCount(pathRows) > 1
+        pathDraft.anchorCount > 1
             ? "有多个 $PATH 锚点：只有第一个起「继承既有 PATH」的作用，多余的请删掉。"
             : nil
     }
@@ -428,95 +420,57 @@ public final class AppModel: ObservableObject {
             : nil
     }
 
-    public func setPathRowText(_ text: String, at index: Int) {
-        guard pathRows.indices.contains(index), !pathRows[index].isAnchor else { return }
-        pathRows[index].text = text
-        writePathRecord(from: pathRows)
+    public func setPathRowText(_ text: String, forRow id: UUID) {
+        editPathDraft { $0.setText(text, for: id) }
     }
 
     public func addPathRow(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        pathRows = PathEditor.normalized(pathRows + [PathRow(text: trimmed)])
-        writePathRecord(from: pathRows)
+        editPathDraft { $0.addEntry(text) }
     }
 
     public func addPathAnchor() {
-        guard !pathHasAnchor else { return }
-        pathRows.append(PathRow(text: "$PATH", isAnchor: true))
-        writePathRecord(from: pathRows)
+        editPathDraft { $0.addAnchor() }
     }
-
-    public func canRemovePathRow(at index: Int) -> Bool {
-        guard pathRows.indices.contains(index) else { return false }
-        // 唯一的锚点是「继承既有 PATH」的唯一表达，不给删；出现多个时才允许清理。
-        return !pathRows[index].isAnchor || PathEditor.anchorCount(pathRows) > 1
-    }
-
-    public func removePathRow(at index: Int) {
-        guard canRemovePathRow(at: index) else { return }
-        pathRows.remove(at: index)
-        writePathRecord(from: pathRows)
-    }
-
-    public func movePathRows(from offsets: IndexSet, to destination: Int) {
-        pathRows = Self.reorder(pathRows, from: offsets, to: destination)
-        writePathRecord(from: pathRows)
-    }
-
-    public func nudgePathRow(at index: Int, by delta: Int) {
-        let target = index + delta
-        guard pathRows.indices.contains(index), pathRows.indices.contains(target) else { return }
-        pathRows.swapAt(index, target)
-        writePathRecord(from: pathRows)
-    }
-
-    // 视图一律用下面这几个「按 id 定位」的入口：提交时的归一化会拆行、重排，
-    // 渲染时算出来的下标可能已经指向别的行了，用 id 定位才安全。
 
     public func pathRowIndex(of id: UUID) -> Int? {
-        pathRows.firstIndex { $0.id == id }
-    }
-
-    public func setPathRowText(_ text: String, forRow id: UUID) {
-        guard let index = pathRowIndex(of: id) else { return }
-        setPathRowText(text, at: index)
+        pathDraft.index(of: id)
     }
 
     public func canRemovePathRow(_ id: UUID) -> Bool {
-        guard let index = pathRowIndex(of: id) else { return false }
-        return canRemovePathRow(at: index)
+        pathDraft.canRemove(id)
     }
 
     public func removePathRow(_ id: UUID) {
-        guard let index = pathRowIndex(of: id) else { return }
-        removePathRow(at: index)
+        editPathDraft { $0.remove(id) }
     }
 
     public func nudgePathRow(_ id: UUID, by delta: Int) {
-        guard let index = pathRowIndex(of: id) else { return }
-        nudgePathRow(at: index, by: delta)
+        editPathDraft { $0.move(id, by: delta) }
     }
 
-    /// 提交（回车/失焦）：把行文本按 `:` 与 `$PATH` 重新解析成行——写进文件的是语义，不是行。
+    /// SwiftUI 的拖动 API 使用下标；视图负责转成稳定行 ID，模型只接收身份顺序。
+    public func reorderPathRows(_ rowIDs: [UUID]) {
+        editPathDraft { $0.reorder(to: rowIDs) }
+    }
+
+    /// 提交（回车/失焦）：归一化行文本；拆分时保留未受影响行与首个片段的身份。
     public func commitPathRows() {
-        let normalized = PathEditor.normalized(pathRows)
-        guard !PathEditor.sameStructure(normalized, pathRows) else { return }
-        pathRows = normalized
-        writePathRecord(from: pathRows)
+        editPathDraft { $0.commit() }
     }
 
-    /// 行编辑 → 记录原始值。语义没变就不写（否则一次失焦会把 `${PATH}` 重排成 `$PATH`、白标「待生效」）。
-    private func writePathRecord(from rows: [PathRow]) {
-        guard let current = pathRecord else { return }
-        // 兜底：草稿还没同步过时，空草稿不代表「用户删光了」。先同步，绝不把整条 PATH 写成空。
-        guard pathRowsLoaded || current.rawValue.isEmpty else {
-            syncPathRows()
+    /// 记录原始值始终是待生效状态的权威来源；未载入时先以记录重建，再接受后续编辑。
+    private func editPathDraft(_ edit: (inout PathDraft) -> String?) {
+        guard let current = pathRecord else {
+            pathDraft.synchronize(with: nil)
             return
         }
-        guard PathEditor.changesSemantics(currentRawValue: current.rawValue, rows: rows) else { return }
+        guard pathDraft.prepareForEditing(currentRawValue: current.rawValue),
+              let rawValue = edit(&pathDraft),
+              pathDraft.hasSemanticChange(from: current.rawValue, to: rawValue)
+        else { return }
+
         Self.mutate(&entries, key: VariableKeys.path) { record in
-            record.rawValue = PathEditor.rawValue(from: rows)
+            record.rawValue = rawValue
             record.quoteStyle = .double
         }
     }

@@ -622,18 +622,101 @@ struct AppModelTests {
         #expect(harness.model.pathRecord?.rawValue == "/a:$PATH:/b")
         #expect(harness.model.pendingCount == 1)
 
-        harness.model.nudgePathRow(at: 0, by: 1)
+        harness.model.nudgePathRow(try #require(harness.model.pathRows.first?.id), by: 1)
         #expect(harness.model.pathRows.map(\.text) == ["$PATH", "/a", "/b"])
         #expect(harness.model.pathRecord?.rawValue == "$PATH:/a:/b")
 
-        harness.model.movePathRows(from: IndexSet(integer: 1), to: 0)
+        let currentIDs = harness.model.pathRows.map(\.id)
+        harness.model.reorderPathRows([currentIDs[1], currentIDs[0], currentIDs[2]])
         #expect(harness.model.pathRows.map(\.text) == ["/a", "$PATH", "/b"])
 
-        harness.model.removePathRow(at: 0)
+        harness.model.removePathRow(try #require(harness.model.pathRows.first?.id))
         #expect(harness.model.pathRecord?.rawValue == "$PATH:/b")
 
         await harness.model.apply()
         #expect(try harness.profileContent.contains("export PATH=\"$PATH:/b\""))
+    }
+
+    @Test func undoingPathRemovalRebuildsRowsFromTheAppliedValue() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH")
+
+        harness.model.addPathRow("/draft")
+        harness.model.deleteRecord("PATH")
+        harness.model.undoRemoval("PATH")
+
+        #expect(harness.model.pathRecord?.rawValue == "/a:$PATH")
+        #expect(harness.model.pathRows.map(\.text) == ["/a", "$PATH"])
+        #expect(harness.model.pendingCount == 0)
+
+        harness.model.addPathRow("/after-undo")
+        #expect(harness.model.pathRecord?.rawValue == "/a:$PATH:/after-undo")
+        #expect(harness.model.pathRecord?.rawValue.contains("/draft") == false)
+    }
+
+    @Test func replacingPathValueRebuildsRowsAndRejectsStaleRowIDs() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/old:$PATH")
+        let oldRowID = try #require(harness.model.pathRows.first?.id)
+
+        harness.model.setRawValue("/new:$PATH", for: "PATH")
+
+        #expect(harness.model.pathRows.map(\.text) == ["/new", "$PATH"])
+        harness.model.setPathRowText("/stale", forRow: oldRowID)
+        #expect(harness.model.pathRecord?.rawValue == "/new:$PATH")
+    }
+
+    @Test func applyCommitsColonInputBeforeWriting() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH")
+        let rowID = try #require(harness.model.pathRows.first?.id)
+
+        harness.model.setPathRowText("/first:/second", forRow: rowID)
+        #expect(harness.model.pathRecord?.rawValue == "/first:/second:$PATH")
+
+        await harness.model.apply()
+
+        #expect(harness.model.pathRows.map(\.text) == ["/first", "/second", "$PATH"])
+        #expect(try harness.profileContent.contains("export PATH=\"/first:/second:$PATH\""))
+        #expect(harness.model.pendingCount == 0)
+    }
+
+    @Test func reloadingRebuildsPathRowsFromTheAppliedValue() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/applied:$PATH")
+
+        harness.model.setRawValue("/draft:$PATH", for: "PATH")
+        await harness.model.reload()
+
+        #expect(harness.model.pathRecord?.rawValue == "/applied:$PATH")
+        #expect(harness.model.pathRows.map(\.text) == ["/applied", "$PATH"])
+    }
+
+    @Test func committingColonInputSplitsTheRowAndPreservesUnaffectedIDs() async throws {
+        let harness = try Harness()
+        await harness.model.start()
+        await harness.addApplied("PATH", "/a:$PATH:/z")
+        let originalRows = harness.model.pathRows
+        let editedID = try #require(originalRows.first?.id)
+        let anchorID = try #require(originalRows.first(where: \.isAnchor)?.id)
+        let unaffectedID = try #require(originalRows.last?.id)
+
+        harness.model.setPathRowText("/first:/second", forRow: editedID)
+        #expect(harness.model.pathRows.map(\.text) == ["/first:/second", "$PATH", "/z"])
+        #expect(harness.model.pathRecord?.rawValue == "/first:/second:$PATH:/z")
+
+        harness.model.commitPathRows()
+
+        #expect(harness.model.pathRows.map(\.text) == ["/first", "/second", "$PATH", "/z"])
+        #expect(harness.model.pathRows[0].id == editedID)
+        #expect(harness.model.pathRows[1].id != editedID)
+        #expect(harness.model.pathRows[2].id == anchorID)
+        #expect(harness.model.pathRows[3].id == unaffectedID)
+        #expect(harness.model.pathRecord?.rawValue == "/first:/second:$PATH:/z")
     }
 
     @Test func anchorIsProtectedUnlessDuplicated() async throws {
@@ -641,10 +724,11 @@ struct AppModelTests {
         await harness.model.start()
         await harness.addApplied("PATH", "/a:$PATH")
 
-        #expect(!harness.model.canRemovePathRow(at: 1)) // 唯一的锚点不给删
+        let anchorID = try #require(harness.model.pathRows.first(where: { $0.isAnchor })?.id)
+        #expect(!harness.model.canRemovePathRow(anchorID)) // 唯一的锚点不给删
         harness.model.addPathRow("$PATH")
         #expect(harness.model.pathAnchorWarning != nil)
-        #expect(harness.model.canRemovePathRow(at: 1))
+        #expect(harness.model.canRemovePathRow(anchorID))
 
         harness.model.commitPathRows()
         #expect(harness.model.pathRows.map(\.isAnchor) == [false, true, true])
@@ -705,6 +789,9 @@ struct AppModelTests {
         #expect(harness.model.pendingCount == 1)
         // 没有锚点时界面会提醒「整条 PATH 会被替换」
         #expect(!harness.model.pathHasAnchor)
+
+        await harness.model.apply()
+        #expect(try harness.profileContent.contains("export PATH=\"\""))
     }
 
     /// 改名进出 PATH：行草稿必须跟着重建，否则下一次行编辑会写进已经不属于 PATH 的记录。

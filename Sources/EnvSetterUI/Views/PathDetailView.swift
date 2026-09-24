@@ -58,7 +58,9 @@ struct PathDetailView: View {
                 PathRowView(model: model, row: row, focusedRow: $focusedRow)
             }
             .onMove { offsets, destination in
-                model.movePathRows(from: offsets, to: destination)
+                var reorderedRows = model.pathRows
+                reorderedRows.move(fromOffsets: offsets, toOffset: destination)
+                model.reorderPathRows(reorderedRows.map(\.id))
             }
         }
         .listStyle(.inset)

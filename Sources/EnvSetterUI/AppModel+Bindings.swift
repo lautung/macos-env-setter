@@ -39,13 +39,6 @@ public extension AppModel {
         )
     }
 
-    func pathRowTextBinding(at index: Int) -> Binding<String> {
-        Binding(
-            get: { self.pathRows.indices.contains(index) ? self.pathRows[index].text : "" },
-            set: { self.setPathRowText($0, at: index) }
-        )
-    }
-
     /// 行内输入框用这个：按 id 定位，提交时的归一化拆行/重排不会让它写错行。
     func pathRowTextBinding(forRow id: UUID) -> Binding<String> {
         Binding(
